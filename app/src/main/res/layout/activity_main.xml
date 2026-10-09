@@ -120,7 +120,7 @@
             android:layout_height="60dp"
             android:layout_marginTop="26dp"
             android:enabled="false"
-            android:text="Enhance & export" />
+            android:text="Enhance &amp; export" />
 
         <ProgressBar
             android:id="@+id/progressBar"
