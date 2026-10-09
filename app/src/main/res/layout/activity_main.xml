@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#101114"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Video Enhancer"
+            android:textColor="#FFFFFF"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="GPU enhancement + high-quality Lanczos scaling"
+            android:textColor="#AEB4C0"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/selectButton"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="24dp"
+            android:text="Choose video" />
+
+        <TextView
+            android:id="@+id/fileText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="No video selected"
+            android:textColor="#D7DBE4"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Enhancement preset"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/presetSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="52dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Output resolution"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/resolutionSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="52dp" />
+
+        <TextView
+            android:id="@+id/brightnessLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Brightness"
+            android:textColor="#FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/brightnessSeek"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="50" />
+
+        <TextView
+            android:id="@+id/contrastLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Contrast"
+            android:textColor="#FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/contrastSeek"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="56" />
+
+        <TextView
+            android:id="@+id/saturationLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Saturation"
+            android:textColor="#FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/saturationSeek"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="58" />
+
+        <Button
+            android:id="@+id/enhanceButton"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_marginTop="26dp"
+            android:enabled="false"
+            android:text="Enhance & export" />
+
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="18dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:gravity="center"
+            android:text="Ready"
+            android:textColor="#C4CAD6"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="20dp"
+            android:text="V1 performs deterministic GPU enhancement and high-quality resampling. Neural super-resolution/denoise will be added as a separate on-device engine so the app does not pretend ordinary scaling can recreate missing detail."
+            android:textColor="#7F8796"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+</ScrollView>
