@@ -12,6 +12,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,10 +27,10 @@ jobs:
 
       - name: Accept Android SDK licenses
         shell: bash
-        run: yes | sdkmanager --licenses >/dev/null || true
+        run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
 
       - name: Install Android 36 SDK
-        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+        run: /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
