@@ -5,19 +5,22 @@ import com.google.ai.edge.litert.Accelerator
 import java.util.Locale
 
 /**
- * GPU isolation matrix for NanoVSR feasibility.
+ * Second-stage NanoVSR GPU feasibility matrix.
  *
- * The first real-device run proved that the full 5x180x320 NanoVSR graph cannot
- * compile on the tested phone GPU while CPU inference is far too slow. This
- * probe intentionally avoids any product-path changes and isolates the failure
- * to individual operator families, rank-5 temporal indexing, or graph/shape size.
+ * The first device matrix proved two independent LiteRT GPU blockers on the
+ * tested Snapdragon 680 / Adreno 610 phone: DepthToSpace (PixelShuffle) and
+ * rank-5 temporal gather. This matrix removes both blockers independently and
+ * asks a narrower question: can the genuine NanoVSR low-resolution recurrent
+ * brain run fast on GPU if temporal frames are exposed as five ordinary 4D
+ * inputs, and which GPU-friendly high-resolution head family is viable?
  */
 object NanoVsrDeviceBenchmark {
 
     private data class ProbeSpec(
         val label: String,
         val assetName: String,
-        val inputElements: Int
+        val inputElementsPerBuffer: Int,
+        val inputCount: Int = 1
     )
 
     data class Entry(
@@ -32,7 +35,7 @@ object NanoVsrDeviceBenchmark {
         val failed: Int get() = entries.size - passed
 
         fun format(): String = buildString {
-            append("GPU isolation matrix • LiteRT CompiledModel\n")
+            append("NanoVSR GPU rewrite matrix • LiteRT CompiledModel\n")
             append("PASS $passed / ${entries.size} • FAIL $failed\n\n")
             entries.forEachIndexed { index, entry ->
                 if (index > 0) append("\n")
@@ -46,26 +49,51 @@ object NanoVsrDeviceBenchmark {
                     append(entry.error)
                 }
             }
-            append("\n\nInterpretation:\n")
-            append("• Primitive FAIL => unsupported GPU operator/runtime path.\n")
-            append("• Primitives PASS + Rank5 FAIL => temporal tensor/indexing limitation.\n")
-            append("• Small NanoVSR PASS + large FAIL => shape/resource threshold.\n")
-            append("• All small probes PASS + all NanoVSR FAIL => composite graph/backend limitation.\n")
-            append("CPU is not rerun here; the previous real-device result was ~22.48 s per 5-frame window (0.2 fps).")
+            append("\n\nDecision guide:\n")
+            append("• 4D core PASS => keep NanoVSR temporal recurrence; replace only the HR head.\n")
+            append("• 4D core FAIL at every size => abandon LiteRT NanoVSR on this GPU.\n")
+            append("• TransposeConv PASS => learned x2 head can avoid PixelShuffle.\n")
+            append("• Resize+Conv PASS => retrain/distill a GPU-safe residual head.\n")
+            append("• Small core PASS + large core FAIL => tile the LR temporal core, not HR output.\n")
+            append("This probe does not rerun the known-slow CPU path.")
         }
     }
 
     private val probes = listOf(
-        ProbeSpec("Conv + LeakyReLU (4D)", "probe_conv_leaky.tflite", 1 * 3 * 64 * 64),
-        ProbeSpec("PReLU (4D)", "probe_prelu.tflite", 1 * 3 * 64 * 64),
-        ProbeSpec("PixelShuffle x2 / DepthToSpace (4D)", "probe_pixelshuffle.tflite", 1 * 3 * 64 * 64),
-        ProbeSpec("Bilinear Resize x4 (4D)", "probe_resize.tflite", 1 * 3 * 32 * 32),
-        ProbeSpec("Concat + 1x1 Conv (4D)", "probe_concat.tflite", 1 * 3 * 64 * 64),
-        ProbeSpec("Rank-5 temporal gather + fusion", "probe_rank5_gather.tflite", 1 * 5 * 3 * 32 * 32),
-        ProbeSpec("NanoVSR full graph • 5x32x32", "nanovsr_226k_t5_32x32.tflite", 1 * 5 * 3 * 32 * 32),
-        ProbeSpec("NanoVSR full graph • 5x64x64", "nanovsr_226k_t5_64x64.tflite", 1 * 5 * 3 * 64 * 64),
-        ProbeSpec("NanoVSR full graph • 5x96x160", "nanovsr_226k_t5_96x160.tflite", 1 * 5 * 3 * 96 * 160),
-        ProbeSpec("NanoVSR full graph • 5x180x320", "nanovsr_226k_t5_180x320.tflite", 1 * 5 * 3 * 180 * 320)
+        ProbeSpec(
+            "TransposeConv x2 candidate head (4D)",
+            "probe_transposeconv_x2.tflite",
+            1 * 3 * 32 * 32
+        ),
+        ProbeSpec(
+            "Resize x2 + Conv + PReLU candidate head (4D)",
+            "probe_resizeconv_head.tflite",
+            1 * 32 * 32 * 32
+        ),
+        ProbeSpec(
+            "NanoVSR genuine temporal core • five 4D inputs • 32x32",
+            "nanovsr_core4d_t5_32x32.tflite",
+            1 * 3 * 32 * 32,
+            inputCount = 5
+        ),
+        ProbeSpec(
+            "NanoVSR genuine temporal core • five 4D inputs • 64x64",
+            "nanovsr_core4d_t5_64x64.tflite",
+            1 * 3 * 64 * 64,
+            inputCount = 5
+        ),
+        ProbeSpec(
+            "NanoVSR genuine temporal core • five 4D inputs • 96x160",
+            "nanovsr_core4d_t5_96x160.tflite",
+            1 * 3 * 96 * 160,
+            inputCount = 5
+        ),
+        ProbeSpec(
+            "NanoVSR genuine temporal core • five 4D inputs • 180x320",
+            "nanovsr_core4d_t5_180x320.tflite",
+            1 * 3 * 180 * 320,
+            inputCount = 5
+        )
     )
 
     fun assetsAvailable(context: Context): Boolean = probes.all { spec ->
@@ -80,7 +108,7 @@ object NanoVsrDeviceBenchmark {
         context: Context,
         onProgress: (completed: Int, total: Int, label: String) -> Unit = { _, _, _ -> }
     ): Result {
-        require(assetsAvailable(context)) { "GPU isolation assets are not packaged in this build" }
+        require(assetsAvailable(context)) { "GPU rewrite probe assets are not packaged in this build" }
         val appContext = context.applicationContext
         val entries = ArrayList<Entry>(probes.size)
 
@@ -99,8 +127,16 @@ object NanoVsrDeviceBenchmark {
             runner = LiteRtModelRunner.fromAssets(context, spec.assetName, Accelerator.GPU)
             val compileMs = elapsedMs(compileStart)
 
-            val input = FloatArray(spec.inputElements) { index -> ((index * 37) % 251) / 250f }
-            runner.writeInput(input)
+            if (runner.inputBuffers.size != spec.inputCount) {
+                error("Expected ${spec.inputCount} model inputs but runtime exposed ${runner.inputBuffers.size}")
+            }
+            runner.inputBuffers.forEachIndexed { bufferIndex, tensorBuffer ->
+                val input = FloatArray(spec.inputElementsPerBuffer) { elementIndex ->
+                    (((elementIndex * 37) + (bufferIndex * 17)) % 251) / 250f
+                }
+                tensorBuffer.writeFloat(input)
+            }
+
             val invokeStart = System.nanoTime()
             runner.invoke()
             val invokeMs = elapsedMs(invokeStart)
