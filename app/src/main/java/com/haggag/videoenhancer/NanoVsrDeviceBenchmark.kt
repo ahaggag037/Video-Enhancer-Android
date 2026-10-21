@@ -5,26 +5,25 @@ import com.google.ai.edge.litert.Accelerator
 import java.util.Locale
 
 /**
- * Exact NanoVSR GPU rewrite benchmark.
+ * NanoVSR temporal-core benchmark.
  *
- * This build keeps the released NanoVSR-226k weights and temporal recurrence but
- * removes the two operators proven incompatible on the test device:
- *  1) rank-5 temporal gather -> five ordinary 4D inputs with an unrolled recurrence;
- *  2) PixelShuffle/DepthToSpace -> exact one-hot deconvolution, then exact
- *     zero-stuff ResizeNearest+Mul+Conv2D lowering.
+ * The exact full-model rewrite proved GPU compatibility but also proved that the
+ * learned x4 reconstruction head is too expensive on the target Adreno device.
+ * This gate measures where the cost lives by removing the HR head entirely:
  *
- * The conversion workflow performs a CPU parity assertion against upstream
- * NanoVSR before this APK is produced. This class only measures real-device GPU
- * compile and execution.
+ *  1) bidirectional 5-frame temporal core -> center-frame fused LR features;
+ *  2) streaming forward core -> one LR frame + hidden state -> next hidden state.
+ *
+ * No decode/encode/compositor work is included. These are architecture probes,
+ * not product-quality output models.
  */
 object NanoVsrDeviceBenchmark {
 
     private data class ProbeSpec(
         val label: String,
         val assetName: String,
-        val inputElementsPerBuffer: Int,
-        val inputCount: Int = 5,
-        val framesPerInvoke: Int = 5
+        val inputElements: List<Int>,
+        val usefulFramesPerInvoke: Int
     )
 
     data class Entry(
@@ -40,7 +39,7 @@ object NanoVsrDeviceBenchmark {
         val failed: Int get() = entries.size - passed
 
         fun format(): String = buildString {
-            append("Exact NanoVSR GPU rewrite • LiteRT CompiledModel\n")
+            append("NanoVSR LR temporal-core benchmark • LiteRT GPU\n")
             append("PASS $passed / ${entries.size} • FAIL $failed\n\n")
             entries.forEachIndexed { index, entry ->
                 if (index > 0) append("\n")
@@ -48,41 +47,49 @@ object NanoVsrDeviceBenchmark {
                 append(entry.label)
                 if (entry.error == null) {
                     append(String.format(Locale.US, " • compile %.0f ms", entry.compileMs))
-                    append(String.format(Locale.US, " • first invoke %.1f ms", entry.invokeMs))
-                    append(String.format(Locale.US, " • model-only %.1f fps", entry.effectiveFps))
+                    append(String.format(Locale.US, " • invoke %.1f ms", entry.invokeMs))
+                    append(String.format(Locale.US, " • %.1f useful fps", entry.effectiveFps))
                 } else {
                     append("\n  ")
                     append(entry.error)
                 }
             }
             append("\n\nInterpretation:\n")
-            append("• PASS means the exact-weight rewrite compiles and executes on this GPU.\n")
-            append("• The reported fps is model-only for five frames; decode/compose/encode are not included.\n")
-            append("• If 180x320 is too slow but smaller sizes are fast, Smart can run the temporal brain at a smaller LR scale and let the final GPU compositor reach the target resolution.\n")
-            append("• If all sizes fail, this LiteRT GPU route is rejected for this device family.")
+            append("• These probes REMOVE the neural x4 HR head; they measure only the temporal brain at LR.\n")
+            append("• Bidir consumes five frames to produce one center-frame LR feature map; useful fps counts one output frame.\n")
+            append("• Streaming consumes one frame plus the previous hidden state and produces the next hidden state; useful fps is true per-frame core throughput.\n")
+            append("• If streaming 180x320 is practical, V3 should keep AI at LR and let a fused GPU compositor perform final reconstruction/upscale.\n")
+            append("• If only 96x160 is practical, Smart should downscale the temporal brain and reserve HR work for deterministic GPU reconstruction.")
         }
     }
 
+    private fun frameElements(h: Int, w: Int) = 3 * h * w
+    private fun stateElements(h: Int, w: Int) = 32 * h * w
+
     private val probes = listOf(
         ProbeSpec(
-            "Exact rewrite • 5x32x32 -> 5x128x128",
-            "nanovsr_exact4d_t5_32x32.tflite",
-            1 * 3 * 32 * 32
+            label = "Bidir core • 5x96x160 -> center 32ch LR features",
+            assetName = "nanovsr_core_bidir_t5_96x160.tflite",
+            inputElements = List(5) { frameElements(96, 160) },
+            usefulFramesPerInvoke = 1
         ),
         ProbeSpec(
-            "Exact rewrite • 5x64x64 -> 5x256x256",
-            "nanovsr_exact4d_t5_64x64.tflite",
-            1 * 3 * 64 * 64
+            label = "Bidir core • 5x180x320 -> center 32ch LR features",
+            assetName = "nanovsr_core_bidir_t5_180x320.tflite",
+            inputElements = List(5) { frameElements(180, 320) },
+            usefulFramesPerInvoke = 1
         ),
         ProbeSpec(
-            "Exact rewrite • 5x96x160 -> 5x384x640",
-            "nanovsr_exact4d_t5_96x160.tflite",
-            1 * 3 * 96 * 160
+            label = "Streaming forward core • 96x160 + state",
+            assetName = "nanovsr_core_stream_96x160.tflite",
+            inputElements = listOf(frameElements(96, 160), stateElements(96, 160)),
+            usefulFramesPerInvoke = 1
         ),
         ProbeSpec(
-            "Exact rewrite • 5x180x320 -> 5x720x1280",
-            "nanovsr_exact4d_t5_180x320.tflite",
-            1 * 3 * 180 * 320
+            label = "Streaming forward core • 180x320 + state",
+            assetName = "nanovsr_core_stream_180x320.tflite",
+            inputElements = listOf(frameElements(180, 320), stateElements(180, 320)),
+            usefulFramesPerInvoke = 1
         )
     )
 
@@ -98,7 +105,7 @@ object NanoVsrDeviceBenchmark {
         context: Context,
         onProgress: (completed: Int, total: Int, label: String) -> Unit = { _, _, _ -> }
     ): Result {
-        require(assetsAvailable(context)) { "Exact NanoVSR GPU rewrite assets are not packaged in this build" }
+        require(assetsAvailable(context)) { "NanoVSR temporal-core assets are not packaged in this build" }
         val appContext = context.applicationContext
         val entries = ArrayList<Entry>(probes.size)
 
@@ -117,27 +124,37 @@ object NanoVsrDeviceBenchmark {
             runner = LiteRtModelRunner.fromAssets(context, spec.assetName, Accelerator.GPU)
             val compileMs = elapsedMs(compileStart)
 
-            if (runner.inputBuffers.size != spec.inputCount) {
-                error("Expected ${spec.inputCount} model inputs but runtime exposed ${runner.inputBuffers.size}")
+            if (runner.inputBuffers.size != spec.inputElements.size) {
+                error("Expected ${spec.inputElements.size} model inputs but runtime exposed ${runner.inputBuffers.size}")
             }
+
             runner.inputBuffers.forEachIndexed { bufferIndex, tensorBuffer ->
-                val input = FloatArray(spec.inputElementsPerBuffer) { elementIndex ->
+                val count = spec.inputElements[bufferIndex]
+                val input = FloatArray(count) { elementIndex ->
                     (((elementIndex * 37) + (bufferIndex * 17)) % 251) / 250f
                 }
                 tensorBuffer.writeFloat(input)
             }
 
-            val invokeStart = System.nanoTime()
+            // Warm once so compile/lazy shader creation does not dominate the timing.
             runner.invoke()
-            // GPU run() may enqueue work; force completion through one output read.
             runner.readOutput()
-            val invokeMs = elapsedMs(invokeStart)
-            val fps = spec.framesPerInvoke * 1000.0 / invokeMs
+
+            val samples = DoubleArray(3)
+            repeat(samples.size) { sampleIndex ->
+                val start = System.nanoTime()
+                runner.invoke()
+                runner.readOutput() // force GPU completion
+                samples[sampleIndex] = elapsedMs(start)
+            }
+            samples.sort()
+            val medianMs = samples[1]
+            val fps = spec.usefulFramesPerInvoke * 1000.0 / medianMs
 
             Entry(
-                spec.label,
+                label = spec.label,
                 compileMs = compileMs,
-                invokeMs = invokeMs,
+                invokeMs = medianMs,
                 effectiveFps = fps
             )
         } catch (failure: Throwable) {
@@ -156,11 +173,8 @@ object NanoVsrDeviceBenchmark {
         var depth = 0
         while (current != null && depth < 6) {
             val message = current.message?.replace('\n', ' ')?.trim().orEmpty()
-            val part = if (message.isEmpty()) {
-                current.javaClass.simpleName
-            } else {
-                "${current.javaClass.simpleName}: $message"
-            }
+            val part = if (message.isEmpty()) current.javaClass.simpleName
+            else "${current.javaClass.simpleName}: $message"
             if (parts.lastOrNull() != part) parts += part
             current = current.cause
             depth++
