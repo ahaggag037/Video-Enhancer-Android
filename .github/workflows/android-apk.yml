@@ -42,7 +42,7 @@ jobs:
         run: |
           mkdir -p app/src/main/assets
           curl --fail --location --retry 3 --retry-delay 2 \
-            "https://huggingface.co/litert-community/VDSR/resolve/main/vdsr_256_fp16.tflite" \
+            "https://huggingface.co/mlboydaisuke/vdsr-litert/resolve/main/vdsr_256_fp16.tflite" \
             --output app/src/main/assets/vdsr_256_fp16.tflite
           test "$(stat -c%s app/src/main/assets/vdsr_256_fp16.tflite)" -gt 1000000
           sha256sum app/src/main/assets/vdsr_256_fp16.tflite
