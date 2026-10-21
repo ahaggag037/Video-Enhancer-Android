@@ -199,13 +199,19 @@ class MainActivity : AppCompatActivity() {
                 tempFile.delete()
                 currentTempFile = null
                 setExporting(false)
-                statusText.text = "Export failed: ${exportException.message ?: "unknown error"}"
-                Toast.makeText(this@MainActivity, "Could not enhance this video on this device", Toast.LENGTH_LONG).show()
+                val failure = ExportPolicy.formatFailure(
+                    errorCodeName = exportException.errorCodeName,
+                    message = exportException.message,
+                    causeMessage = exportException.cause?.message
+                )
+                statusText.text = failure
+                Toast.makeText(this@MainActivity, failure, Toast.LENGTH_LONG).show()
             }
         }
 
         currentTransformer = Transformer.Builder(this)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
+            .setMaxDelayBetweenMuxerSamplesMs(ExportPolicy.maxDelayBetweenMuxerSamplesMs)
             .addListener(listener)
             .build()
 
