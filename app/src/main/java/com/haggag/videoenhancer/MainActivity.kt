@@ -116,7 +116,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupSpinners() {
         val engines = listOf(
             "Smart AI (Recommended)",
-            "AI Detail — Real-ESRGAN",
+            "AI Detail — Real-ESRGAN (slow / short clips)",
             "Fast GPU"
         )
         engineSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, engines)
@@ -161,10 +161,11 @@ class MainActivity : AppCompatActivity() {
                     enhanceButton.isEnabled = !exporting
                     statusText.text = String.format(
                         Locale.US,
-                        "Ready • %d×%d • %.1f fps",
+                        "Ready • %d×%d • %.1f fps • %,d frames",
                         info.displayWidth,
                         info.displayHeight,
-                        info.fps
+                        info.fps,
+                        info.frameCount
                     )
                 }.onFailure { error ->
                     selectedSourceInfo = null
@@ -217,6 +218,7 @@ class MainActivity : AppCompatActivity() {
         val plan = EnhancementPlanner.plan(
             sourceWidth = info.displayWidth,
             sourceHeight = info.displayHeight,
+            frameCount = info.frameCount,
             outputChoice = selectedOutput(),
             engineChoice = selectedEngine()
         )
@@ -224,7 +226,10 @@ class MainActivity : AppCompatActivity() {
         setExporting(true)
         when (plan.path) {
             EnhancementPlanner.Path.AI_DETAIL -> startAiEnhancement(input, plan)
-            EnhancementPlanner.Path.FAST_GPU -> startFastEnhancement(input, smartFallback = false)
+            EnhancementPlanner.Path.FAST_GPU -> startFastEnhancement(
+                input,
+                smartFallback = plan.requestedEngine == EnhancementPlanner.EngineChoice.SMART
+            )
         }
     }
 
@@ -282,8 +287,8 @@ class MainActivity : AppCompatActivity() {
                     currentTempFile = null
                     if (plan.requestedEngine == EnhancementPlanner.EngineChoice.SMART && selectedUri == input) {
                         progressBar.isIndeterminate = true
-                        progressText.text = "Smart fallback • Fast GPU"
-                        statusText.text = "AI unavailable on this device (${compactError(error)}). Switching to Fast GPU…"
+                        progressText.text = "Smart recovery • Fast GPU"
+                        statusText.text = "Neural engine unavailable (${compactError(error)}). Switching to accelerated GPU…"
                         startFastEnhancement(input, smartFallback = true)
                     } else {
                         setExporting(false)
@@ -304,11 +309,15 @@ class MainActivity : AppCompatActivity() {
         AiVideoProcessor.Stage.FINISHING -> "Finalizing"
     }
 
-    /** Known-good V1 Media3 path retained exactly as the compatibility/speed engine. */
+    /** Known-good V1 Media3 path retained as the compatibility/speed engine. */
     private fun startFastEnhancement(input: Uri, smartFallback: Boolean) {
         progressBar.isIndeterminate = true
-        progressText.text = if (smartFallback) "Smart fallback • Fast GPU" else "Fast GPU export"
-        statusText.text = if (smartFallback) "Running verified Fast GPU fallback…" else "Enhancing with Fast GPU…"
+        progressText.text = if (smartFallback) "Smart speed path • Fast GPU" else "Fast GPU export"
+        statusText.text = if (smartFallback) {
+            "Smart chose the accelerated GPU path for this video length…"
+        } else {
+            "Enhancing with Fast GPU…"
+        }
 
         val videoEffects = mutableListOf<Effect>()
         val brightness = brightnessValue()
@@ -346,7 +355,11 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     "device-selected resolution"
                 }
-                saveToGalleryAsync(tempFile, resolution, if (smartFallback) "Smart → Fast GPU" else "Fast GPU")
+                saveToGalleryAsync(
+                    tempFile,
+                    resolution,
+                    if (smartFallback) "Smart accelerated GPU" else "Fast GPU"
+                )
             }
 
             override fun onError(
