@@ -1,0 +1,153 @@
+name: NanoVSR Direct LiteRT Conversion
+
+on:
+  push:
+    branches: [ feature/v3-temporal-restoration-rd ]
+    paths:
+      - '.github/workflows/nanovsr-litert-conversion.yml'
+      - 'tools/nanovsr-litert/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  convert-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CPU PyTorch and LiteRT conversion stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0'
+          python -m pip install 'litert-torch==0.9.4' 'ai-edge-litert' numpy
+
+      - name: Fetch official NanoVSR source and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/filippawlicki/nanovsr.git /tmp/nanovsr
+          curl -L --fail --retry 3 --retry-delay 2 \
+            https://github.com/filippawlicki/nanovsr/releases/download/v1.0/nanovsr_226k.pth \
+            -o /tmp/nanovsr/nanovsr_226k.pth
+          echo 'be3df12f2a0d99d9699656aa4a85a51c119663aa84c7040ac6580a0215d0b00e  /tmp/nanovsr/nanovsr_226k.pth' | sha256sum -c -
+
+      - name: Convert directly PyTorch to LiteRT and verify parity
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee /tmp/nanovsr_litert_conversion.log
+          import json
+          import math
+          import os
+          import sys
+          import traceback
+          import numpy as np
+          import torch
+
+          sys.path.insert(0, '/tmp/nanovsr')
+          from models.nanovsr import NanoVSR
+          from utils import detect_model_config, load_checkpoint_state_dict
+          import litert_torch
+
+          report_path = '/tmp/nanovsr_litert_report.json'
+          report = {
+              'model': 'NanoVSR-226k official v1.0',
+              'input_shape': [1, 5, 3, 64, 64],
+              'toolchain': {
+                  'python': sys.version.split()[0],
+                  'torch': torch.__version__,
+                  'litert_torch': getattr(litert_torch, '__version__', 'unknown'),
+              },
+              'conversion': 'NOT_RUN',
+              'serialized_reload': 'NOT_RUN',
+              'parity': 'NOT_RUN',
+          }
+
+          try:
+              torch.manual_seed(20261021)
+              state = load_checkpoint_state_dict('/tmp/nanovsr/nanovsr_226k.pth')
+              num_feat, num_blocks = detect_model_config(state)
+              report['detected_config'] = {'num_feat': int(num_feat), 'num_blocks': int(num_blocks)}
+
+              model = NanoVSR(num_feat=num_feat, num_blocks=num_blocks)
+              model.load_state_dict(state, strict=True)
+              model.switch_to_deploy()
+              model.eval()
+
+              sample = torch.rand(1, 5, 3, 64, 64, dtype=torch.float32)
+              with torch.no_grad():
+                  reference = model(sample).detach().cpu().numpy()
+
+              edge_model = litert_torch.convert(model, (sample,))
+              report['conversion'] = 'PASS'
+
+              converted = np.asarray(edge_model(sample))
+              max_abs = float(np.max(np.abs(reference - converted)))
+              mean_abs = float(np.mean(np.abs(reference - converted)))
+              mse = float(np.mean((reference - converted) ** 2))
+              psnr = None if mse == 0.0 else float(10.0 * math.log10(1.0 / mse))
+              report['conversion_output'] = {
+                  'shape': list(converted.shape),
+                  'max_abs_error': max_abs,
+                  'mean_abs_error': mean_abs,
+                  'psnr_db': psnr,
+              }
+
+              out_path = '/tmp/nanovsr_226k_t5_64.tflite'
+              edge_model.export(out_path)
+              report['tflite_bytes'] = os.path.getsize(out_path)
+
+              reloaded = litert_torch.load(out_path)
+              reloaded_out = np.asarray(reloaded(sample))
+              report['serialized_reload'] = 'PASS'
+              reload_max_abs = float(np.max(np.abs(converted - reloaded_out)))
+              report['reload_max_abs_error'] = reload_max_abs
+
+              # This is a smoke/parity gate, not the final image-quality metric.
+              parity_ok = max_abs <= 5e-3 and reload_max_abs <= 1e-6
+              report['parity'] = 'PASS' if parity_ok else 'FAIL'
+              if not parity_ok:
+                  raise RuntimeError(
+                      f'LiteRT parity gate failed: max_abs={max_abs:.6g}, reload={reload_max_abs:.6g}'
+                  )
+          except Exception as exc:
+              report['error_type'] = type(exc).__name__
+              report['error'] = str(exc)
+              report['traceback_tail'] = traceback.format_exc().splitlines()[-30:]
+              with open(report_path, 'w') as f:
+                  json.dump(report, f, indent=2)
+              print(json.dumps(report, indent=2))
+              raise
+          else:
+              with open(report_path, 'w') as f:
+                  json.dump(report, f, indent=2)
+              print(json.dumps(report, indent=2))
+          PY
+
+      - name: Hash LiteRT artifact
+        if: success()
+        shell: bash
+        run: sha256sum /tmp/nanovsr_226k_t5_64.tflite | tee /tmp/nanovsr_litert.sha256
+
+      - name: Upload conversion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NanoVSR-226k-LiteRT-conversion-evidence
+          path: |
+            /tmp/nanovsr_litert_report.json
+            /tmp/nanovsr_litert_conversion.log
+            /tmp/nanovsr_226k_t5_64.tflite
+            /tmp/nanovsr_litert.sha256
+          if-no-files-found: warn
