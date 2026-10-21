@@ -37,6 +37,16 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      - name: Download VDSR AI model
+        shell: bash
+        run: |
+          mkdir -p app/src/main/assets
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://huggingface.co/litert-community/VDSR/resolve/main/vdsr_256_fp16.tflite" \
+            --output app/src/main/assets/vdsr_256_fp16.tflite
+          test "$(stat -c%s app/src/main/assets/vdsr_256_fp16.tflite)" -gt 1000000
+          sha256sum app/src/main/assets/vdsr_256_fp16.tflite
+
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
 
@@ -46,6 +56,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Video-Enhancer-Android-debug
+          name: Video-Enhancer-Android-AI-V2-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
