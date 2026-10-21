@@ -1,17 +1,19 @@
 package com.haggag.videoenhancer
 
+import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 object EnhancementPlanner {
 
     /**
-     * Smart mode is deliberately bounded. Real-ESRGAN is genuine learned x4 SR, but applying
-     * tiled neural inference to tens of thousands of video frames is not an interactive mobile
-     * workload. This budget keeps Smart fast while leaving AI_DETAIL available when the user
-     * explicitly wants maximum neural recovery.
+     * Conservative fallback used only when this device has not been benchmarked yet.
+     * Once a measured per-tile runtime is available, Smart uses the measured ETA instead.
      */
     private const val SMART_AI_TILE_INFERENCE_BUDGET = 3_600L
+
+    /** Smart never auto-selects full-frame Real-ESRGAN when the measured neural work exceeds this. */
+    private const val SMART_MAX_MEASURED_NEURAL_MS = 30_000L
 
     enum class EngineChoice {
         SMART,
@@ -37,7 +39,9 @@ object EnhancementPlanner {
         val path: Path,
         val targetWidth: Int,
         val targetHeight: Int,
-        val requestedEngine: EngineChoice
+        val requestedEngine: EngineChoice,
+        val estimatedNeuralMs: Long? = null,
+        val estimatedNeuralTiles: Long = 0L
     )
 
     fun plan(
@@ -45,24 +49,35 @@ object EnhancementPlanner {
         sourceHeight: Int,
         frameCount: Int,
         outputChoice: OutputChoice,
-        engineChoice: EngineChoice
+        engineChoice: EngineChoice,
+        neuralMsPerTile: Double? = null
     ): Plan {
         require(sourceWidth > 0 && sourceHeight > 0) { "Source dimensions must be positive" }
         require(frameCount > 0) { "Frame count must be positive" }
+        require(neuralMsPerTile == null || (neuralMsPerTile.isFinite() && neuralMsPerTile > 0.0)) {
+            "Neural benchmark must be a positive finite duration"
+        }
 
         val target = targetSize(sourceWidth, sourceHeight, outputChoice)
         val sourcePixels = sourceWidth.toLong() * sourceHeight
         val targetPixels = target.width.toLong() * target.height
         val sourceLongEdge = maxOf(sourceWidth, sourceHeight)
+        val tilesPerFrame = AiTileGrid.tiles(sourceWidth, sourceHeight).size.toLong()
+        val estimatedNeuralTiles = tilesPerFrame * frameCount.toLong()
+        val estimatedNeuralMs = neuralMsPerTile?.let {
+            ceil(estimatedNeuralTiles.toDouble() * it).toLong()
+        }
 
         val path = when (engineChoice) {
             EngineChoice.AI_DETAIL -> Path.AI_DETAIL
             EngineChoice.FAST_GPU -> Path.FAST_GPU
             EngineChoice.SMART -> {
                 val meaningfulUpscale = targetPixels > (sourcePixels * 5L / 4L)
-                val tilesPerFrame = AiTileGrid.tiles(sourceWidth, sourceHeight).size.toLong()
-                val estimatedNeuralTiles = tilesPerFrame * frameCount.toLong()
-                val mobileAiWorkload = estimatedNeuralTiles <= SMART_AI_TILE_INFERENCE_BUDGET
+                val mobileAiWorkload = if (estimatedNeuralMs != null) {
+                    estimatedNeuralMs <= SMART_MAX_MEASURED_NEURAL_MS
+                } else {
+                    estimatedNeuralTiles <= SMART_AI_TILE_INFERENCE_BUDGET
+                }
 
                 if (meaningfulUpscale && sourceLongEdge <= 1280 && mobileAiWorkload) {
                     Path.AI_DETAIL
@@ -76,7 +91,9 @@ object EnhancementPlanner {
             path = path,
             targetWidth = target.width,
             targetHeight = target.height,
-            requestedEngine = engineChoice
+            requestedEngine = engineChoice,
+            estimatedNeuralMs = estimatedNeuralMs,
+            estimatedNeuralTiles = estimatedNeuralTiles
         )
     }
 
