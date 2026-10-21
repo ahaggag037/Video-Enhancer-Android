@@ -8,8 +8,8 @@ class EnhancementPlannerTest {
     @Test
     fun smart_uses_ai_for_low_resolution_upscale() {
         val plan = EnhancementPlanner.plan(
-            sourceWidth = 426,
-            sourceHeight = 240,
+            sourceWidth = 640,
+            sourceHeight = 360,
             outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
             engineChoice = EnhancementPlanner.EngineChoice.SMART
         )
