@@ -44,6 +44,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fileText: TextView
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
+    private lateinit var progressText: TextView
+    private lateinit var engineSpinner: Spinner
     private lateinit var presetSpinner: Spinner
     private lateinit var resolutionSpinner: Spinner
     private lateinit var brightnessSeek: SeekBar
@@ -54,21 +56,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var saturationLabel: TextView
 
     private var selectedUri: Uri? = null
+    private var selectedSourceInfo: AiVideoProcessor.SourceInfo? = null
     private var currentTransformer: Transformer? = null
+    private var currentAiProcessor: AiVideoProcessor? = null
     private var currentTempFile: File? = null
     private var exporting = false
 
     private val openVideo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             selectedUri = uri
+            selectedSourceInfo = null
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } catch (_: SecurityException) {
                 // Some providers do not offer persistable permissions; the current grant is still usable.
             }
             fileText.text = queryDisplayName(uri) ?: uri.lastPathSegment ?: "Selected video"
-            enhanceButton.isEnabled = true
-            statusText.text = "Video ready"
+            enhanceButton.isEnabled = false
+            statusText.text = "Analyzing video…"
+            analyzeVideo(uri)
         }
     }
 
@@ -95,6 +101,8 @@ class MainActivity : AppCompatActivity() {
         fileText = findViewById(R.id.fileText)
         statusText = findViewById(R.id.statusText)
         progressBar = findViewById(R.id.progressBar)
+        progressText = findViewById(R.id.progressText)
+        engineSpinner = findViewById(R.id.engineSpinner)
         presetSpinner = findViewById(R.id.presetSpinner)
         resolutionSpinner = findViewById(R.id.resolutionSpinner)
         brightnessSeek = findViewById(R.id.brightnessSeek)
@@ -106,6 +114,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSpinners() {
+        val engines = listOf(
+            "Smart AI (Recommended)",
+            "AI Detail — Real-ESRGAN",
+            "Fast GPU"
+        )
+        engineSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, engines)
+        engineSpinner.setSelection(0)
+
         val presets = listOf("Natural", "Clean", "Vivid", "Maximum")
         presetSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, presets)
         presetSpinner.setSelection(1)
@@ -135,6 +151,30 @@ class MainActivity : AppCompatActivity() {
         updateSliderLabels()
     }
 
+    private fun analyzeVideo(uri: Uri) {
+        Thread({
+            val result = runCatching { AiVideoProcessor.readSourceInfo(this, uri) }
+            runOnUiThread {
+                if (selectedUri != uri || isFinishing) return@runOnUiThread
+                result.onSuccess { info ->
+                    selectedSourceInfo = info
+                    enhanceButton.isEnabled = !exporting
+                    statusText.text = String.format(
+                        Locale.US,
+                        "Ready • %d×%d • %.1f fps",
+                        info.displayWidth,
+                        info.displayHeight,
+                        info.fps
+                    )
+                }.onFailure { error ->
+                    selectedSourceInfo = null
+                    enhanceButton.isEnabled = false
+                    statusText.text = "Could not read video: ${error.message ?: "unsupported file"}"
+                }
+            }
+        }, "video-analyzer").start()
+    }
+
     private fun applyPreset(brightness: Int, contrast: Int, saturation: Int) {
         brightnessSeek.progress = brightness
         contrastSeek.progress = contrast
@@ -154,10 +194,121 @@ class MainActivity : AppCompatActivity() {
 
     private fun signed(value: Float): String = String.format(Locale.US, "%+.2f", value)
 
+    private fun selectedEngine(): EnhancementPlanner.EngineChoice = when (engineSpinner.selectedItemPosition) {
+        1 -> EnhancementPlanner.EngineChoice.AI_DETAIL
+        2 -> EnhancementPlanner.EngineChoice.FAST_GPU
+        else -> EnhancementPlanner.EngineChoice.SMART
+    }
+
+    private fun selectedOutput(): EnhancementPlanner.OutputChoice = when (resolutionSpinner.selectedItemPosition) {
+        0 -> EnhancementPlanner.OutputChoice.ORIGINAL
+        2 -> EnhancementPlanner.OutputChoice.QHD
+        3 -> EnhancementPlanner.OutputChoice.UHD_4K
+        else -> EnhancementPlanner.OutputChoice.FULL_HD
+    }
+
     private fun startEnhancement() {
         val input = selectedUri ?: return
+        val info = selectedSourceInfo ?: run {
+            statusText.text = "Video analysis is not ready yet"
+            return
+        }
+
+        val plan = EnhancementPlanner.plan(
+            sourceWidth = info.displayWidth,
+            sourceHeight = info.displayHeight,
+            outputChoice = selectedOutput(),
+            engineChoice = selectedEngine()
+        )
+
         setExporting(true)
-        statusText.text = "Preparing enhancement…"
+        when (plan.path) {
+            EnhancementPlanner.Path.AI_DETAIL -> startAiEnhancement(input, plan)
+            EnhancementPlanner.Path.FAST_GPU -> startFastEnhancement(input, smartFallback = false)
+        }
+    }
+
+    private fun startAiEnhancement(input: Uri, plan: EnhancementPlanner.Plan) {
+        progressBar.isIndeterminate = false
+        progressBar.progress = 0
+        progressText.text = "0% • Preparing Real-ESRGAN"
+        statusText.text = "Loading genuine AI detail recovery…"
+
+        val outputDir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "VideoEnhancer")
+        outputDir.mkdirs()
+        val tempFile = File(outputDir, "ai_enhanced_${timestamp()}.mp4")
+        currentTempFile = tempFile
+
+        val processor = AiVideoProcessor(this)
+        currentAiProcessor = processor
+        processor.process(
+            inputUri = input,
+            outputFile = tempFile,
+            plan = plan,
+            onProgress = { progress ->
+                runOnUiThread {
+                    if (!exporting || currentAiProcessor !== processor) return@runOnUiThread
+                    progressBar.isIndeterminate = false
+                    progressBar.progress = progress.percent
+                    val backend = progress.backend?.name?.let { " • $it" } ?: ""
+                    progressText.text = "${progress.percent}% • ${stageLabel(progress.stage)}$backend"
+                    statusText.text = when (progress.stage) {
+                        AiVideoProcessor.Stage.PREPARING -> "Preparing Real-ESRGAN…"
+                        AiVideoProcessor.Stage.AI_ENHANCING -> "Recovering detail with Real-ESRGAN • frame ${progress.frame + 1}/${progress.totalFrames}"
+                        AiVideoProcessor.Stage.ENCODING -> "Encoding enhanced video • frame ${progress.frame}/${progress.totalFrames}"
+                        AiVideoProcessor.Stage.AUDIO -> "Preserving original audio…"
+                        AiVideoProcessor.Stage.FINISHING -> "Finalizing AI-enhanced MP4…"
+                    }
+                }
+            },
+            onComplete = { result ->
+                runOnUiThread {
+                    if (currentAiProcessor !== processor) return@runOnUiThread
+                    currentAiProcessor = null
+                    progressBar.progress = 100
+                    progressText.text = "100% • AI enhancement complete"
+                    statusText.text = "AI enhancement complete. Saving to gallery…"
+                    saveToGalleryAsync(
+                        source = result.outputFile,
+                        resolutionLabel = "${plan.targetWidth}×${plan.targetHeight}",
+                        engineLabel = "Real-ESRGAN ${result.backend.name}"
+                    )
+                }
+            },
+            onError = { error ->
+                runOnUiThread {
+                    if (currentAiProcessor !== processor) return@runOnUiThread
+                    currentAiProcessor = null
+                    currentTempFile = null
+                    if (plan.requestedEngine == EnhancementPlanner.EngineChoice.SMART && selectedUri == input) {
+                        progressBar.isIndeterminate = true
+                        progressText.text = "Smart fallback • Fast GPU"
+                        statusText.text = "AI unavailable on this device (${compactError(error)}). Switching to Fast GPU…"
+                        startFastEnhancement(input, smartFallback = true)
+                    } else {
+                        setExporting(false)
+                        val failure = "AI enhancement failed: ${compactError(error)}"
+                        statusText.text = failure
+                        Toast.makeText(this, failure, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        )
+    }
+
+    private fun stageLabel(stage: AiVideoProcessor.Stage): String = when (stage) {
+        AiVideoProcessor.Stage.PREPARING -> "Preparing"
+        AiVideoProcessor.Stage.AI_ENHANCING -> "AI detail recovery"
+        AiVideoProcessor.Stage.ENCODING -> "Encoding"
+        AiVideoProcessor.Stage.AUDIO -> "Audio"
+        AiVideoProcessor.Stage.FINISHING -> "Finalizing"
+    }
+
+    /** Known-good V1 Media3 path retained exactly as the compatibility/speed engine. */
+    private fun startFastEnhancement(input: Uri, smartFallback: Boolean) {
+        progressBar.isIndeterminate = true
+        progressText.text = if (smartFallback) "Smart fallback • Fast GPU" else "Fast GPU export"
+        statusText.text = if (smartFallback) "Running verified Fast GPU fallback…" else "Enhancing with Fast GPU…"
 
         val videoEffects = mutableListOf<Effect>()
         val brightness = brightnessValue()
@@ -170,6 +321,7 @@ class MainActivity : AppCompatActivity() {
             videoEffects += HslAdjustment.Builder().adjustSaturation(saturation).build()
         }
 
+        // Keep the exact resolution behavior that already passed a real 240p -> 1080p device test.
         when (resolutionSpinner.selectedItemPosition) {
             1 -> videoEffects += LanczosResample.scaleToFitWithFlexibleOrientation(1920, 1080)
             2 -> videoEffects += LanczosResample.scaleToFitWithFlexibleOrientation(2560, 1440)
@@ -182,13 +334,19 @@ class MainActivity : AppCompatActivity() {
 
         val outputDir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "VideoEnhancer")
         outputDir.mkdirs()
-        val tempFile = File(outputDir, "enhanced_${timestamp()}.mp4")
+        val tempFile = File(outputDir, "fast_enhanced_${timestamp()}.mp4")
         currentTempFile = tempFile
 
         val listener = object : Transformer.Listener {
             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                statusText.text = "Enhancement complete. Saving to gallery…"
-                saveToGalleryAsync(tempFile, exportResult)
+                currentTransformer = null
+                statusText.text = "Fast enhancement complete. Saving to gallery…"
+                val resolution = if (exportResult.width > 0 && exportResult.height > 0) {
+                    "${exportResult.width}×${exportResult.height}"
+                } else {
+                    "device-selected resolution"
+                }
+                saveToGalleryAsync(tempFile, resolution, if (smartFallback) "Smart → Fast GPU" else "Fast GPU")
             }
 
             override fun onError(
@@ -196,6 +354,7 @@ class MainActivity : AppCompatActivity() {
                 exportResult: ExportResult,
                 exportException: ExportException
             ) {
+                currentTransformer = null
                 tempFile.delete()
                 currentTempFile = null
                 setExporting(false)
@@ -215,11 +374,10 @@ class MainActivity : AppCompatActivity() {
             .addListener(listener)
             .build()
 
-        statusText.text = "Enhancing video… Keep the app open"
         currentTransformer?.start(editedMediaItem, tempFile.absolutePath)
     }
 
-    private fun saveToGalleryAsync(source: File, result: ExportResult) {
+    private fun saveToGalleryAsync(source: File, resolutionLabel: String, engineLabel: String) {
         Thread {
             try {
                 val name = "VideoEnhancer_${timestamp()}.mp4"
@@ -250,8 +408,7 @@ class MainActivity : AppCompatActivity() {
                 currentTempFile = null
                 runOnUiThread {
                     setExporting(false)
-                    val resolution = if (result.width > 0 && result.height > 0) "${result.width}×${result.height}" else "device-selected resolution"
-                    statusText.text = "Saved to Movies/VideoEnhancer • $resolution"
+                    statusText.text = "Saved to Movies/VideoEnhancer • $resolutionLabel • $engineLabel"
                     Toast.makeText(this, "Enhanced video saved", Toast.LENGTH_LONG).show()
                 }
             } catch (t: Throwable) {
@@ -266,13 +423,24 @@ class MainActivity : AppCompatActivity() {
     private fun setExporting(value: Boolean) {
         exporting = value
         progressBar.visibility = if (value) View.VISIBLE else View.GONE
+        progressText.visibility = if (value) View.VISIBLE else View.GONE
+        if (!value) {
+            progressBar.isIndeterminate = false
+            progressBar.progress = 0
+        }
         selectButton.isEnabled = !value
-        enhanceButton.isEnabled = !value && selectedUri != null
+        enhanceButton.isEnabled = !value && selectedUri != null && selectedSourceInfo != null
+        engineSpinner.isEnabled = !value
         presetSpinner.isEnabled = !value
         resolutionSpinner.isEnabled = !value
         brightnessSeek.isEnabled = !value
         contrastSeek.isEnabled = !value
         saturationSeek.isEnabled = !value
+    }
+
+    private fun compactError(error: Throwable): String {
+        val message = error.message?.replace('\n', ' ')?.trim().orEmpty()
+        return if (message.isNotEmpty()) message.take(180) else error.javaClass.simpleName
     }
 
     private fun queryDisplayName(uri: Uri): String? {
@@ -285,7 +453,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (isFinishing) {
+            currentAiProcessor?.cancel()
+            currentAiProcessor = null
             currentTransformer?.cancel()
+            currentTransformer = null
+            currentTempFile?.delete()
+            currentTempFile = null
         }
         super.onDestroy()
     }
