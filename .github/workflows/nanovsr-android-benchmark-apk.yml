@@ -1,4 +1,4 @@
-name: Build Exact NanoVSR GPU Rewrite APK
+name: Build NanoVSR LR Temporal-Core APK
 
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  build-exact-gpu-rewrite-apk:
+  build-lr-core-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -57,7 +57,7 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0'
           python -m pip install 'litert-torch==0.9.4' 'ai-edge-litert' numpy
 
-      - name: Fetch NanoVSR and pinned LiteRT GPU rewrite toolkit
+      - name: Fetch NanoVSR checkpoint
         shell: bash
         run: |
           set -euo pipefail
@@ -67,10 +67,7 @@ jobs:
             -o /tmp/nanovsr/nanovsr_226k.pth
           echo 'be3df12f2a0d99d9699656aa4a85a51c119663aa84c7040ac6580a0215d0b00e  /tmp/nanovsr/nanovsr_226k.pth' | sha256sum -c -
 
-          git clone https://github.com/john-rocky/LiteRT-Models.git /tmp/litert-models
-          git -C /tmp/litert-models checkout c9f725d6feb02ef3c1c60f12ee6a4e0228909215
-
-      - name: Build exact 4D NanoVSR rewrites and verify PyTorch parity
+      - name: Build LR temporal-core models and parity probes
         shell: bash
         run: |
           set -euo pipefail
@@ -81,7 +78,6 @@ jobs:
           import sys
           import torch
           import torch.nn as nn
-          import torch.nn.functional as F
           import litert_torch
 
           torch.manual_seed(20261021)
@@ -90,8 +86,6 @@ jobs:
 
           sys.path.insert(0, '/tmp/nanovsr')
           from models.nanovsr import NanoVSR
-          sys.path.insert(0, '/tmp/litert-models')
-          from litert_gpu_toolkit.patches import pixelshuffle_to_conv_transpose, patch_conv_transpose
 
           checkpoint = torch.load('/tmp/nanovsr/nanovsr_226k.pth', map_location='cpu')
           if isinstance(checkpoint, dict):
@@ -112,24 +106,14 @@ jobs:
           upstream.switch_to_deploy()
           upstream.eval()
 
-          class NanoVSRExact4D(nn.Module):
-              """Upstream NanoVSR semantics with five 4D inputs and one 4D packed output."""
+          class BidirCenterCore(nn.Module):
+              """Exact NanoVSR temporal recurrence/fusion, no x4 neural reconstruction head."""
               def __init__(self, model):
                   super().__init__()
                   self.feat_extract = model.feat_extract
                   self.forward_net = model.forward_net
                   self.backward_net = model.backward_net
                   self.fusion = model.fusion
-                  self.upsample1 = model.upsample1
-                  self.upsample2 = model.upsample2
-                  self.conv_last = model.conv_last
-
-              def enhance(self, fused, base):
-                  out = self.upsample1(fused)
-                  out = self.upsample2(out)
-                  out = self.conv_last(out)
-                  base4 = F.interpolate(base, scale_factor=4.0, mode='bilinear', align_corners=False)
-                  return out + base4
 
               def forward(self, x0, x1, x2, x3, x4):
                   f0 = self.feat_extract(x0)
@@ -141,82 +125,96 @@ jobs:
                   p0 = self.forward_net(f0)
                   p1 = self.forward_net(f1 + p0)
                   p2 = self.forward_net(f2 + p1)
-                  p3 = self.forward_net(f3 + p2)
-                  p4 = self.forward_net(f4 + p3)
 
                   b4 = self.backward_net(f4)
                   b3 = self.backward_net(f3 + b4)
                   b2 = self.backward_net(f2 + b3)
-                  b1 = self.backward_net(f1 + b2)
-                  b0 = self.backward_net(f0 + b1)
 
-                  o0 = self.enhance(self.fusion(torch.cat((p0, b0), dim=1)), x0)
-                  o1 = self.enhance(self.fusion(torch.cat((p1, b1), dim=1)), x1)
-                  o2 = self.enhance(self.fusion(torch.cat((p2, b2), dim=1)), x2)
-                  o3 = self.enhance(self.fusion(torch.cat((p3, b3), dim=1)), x3)
-                  o4 = self.enhance(self.fusion(torch.cat((p4, b4), dim=1)), x4)
-                  # [B, 15, 4H, 4W] instead of a rank-5 [B,5,3,4H,4W] tensor.
-                  return torch.cat((o0, o1, o2, o3, o4), dim=1)
+                  return self.fusion(torch.cat((p2, b2), dim=1))
 
-          def build_rewrite(h, w):
-              model = copy.deepcopy(upstream)
-              # PixelShuffle is only a deterministic channel->spatial permutation.
-              # Replace it exactly by a one-hot ConvTranspose, then lower that exact
-              # operation to ResizeNearest + zero-stuff mask + Conv2D + crop.
-              model.upsample1.pixel_shuffle = pixelshuffle_to_conv_transpose(2, num_feat)
-              model.upsample2.pixel_shuffle = pixelshuffle_to_conv_transpose(2, 32)
-              wrapper = NanoVSRExact4D(model).eval()
-              frames = tuple(torch.zeros(1, 3, h, w, dtype=torch.float32) for _ in range(5))
-              patched = patch_conv_transpose(wrapper, frames)
-              if patched != 2:
-                  raise RuntimeError(f'Expected exactly 2 PixelShuffle deconvs to be lowered, got {patched}')
-              return wrapper, frames
+          class StreamingForwardCore(nn.Module):
+              """One-frame exact forward recurrence from NanoVSR with explicit hidden state."""
+              def __init__(self, model):
+                  super().__init__()
+                  self.feat_extract = model.feat_extract
+                  self.forward_net = model.forward_net
 
-          # Algebraic parity gate on a deterministic non-zero clip.
-          ph = pw = 16
-          parity_frames = tuple(torch.rand(1, 3, ph, pw) for _ in range(5))
+              def forward(self, frame, previous_state):
+                  feat = self.feat_extract(frame)
+                  return self.forward_net(feat + previous_state)
+
+          def export(name, model, inputs):
+              model.eval()
+              edge = litert_torch.convert(model, inputs)
+              path = os.path.join(out_dir, name)
+              edge.export(path)
+              print(path, os.path.getsize(path))
+
+          # Exact-equivalence gate for the computations we keep from upstream.
+          h, w = 24, 32
+          frames = tuple(torch.rand(1, 3, h, w) for _ in range(5))
+          state = torch.rand(1, num_feat, h, w)
+          bidir = BidirCenterCore(copy.deepcopy(upstream)).eval()
+          stream = StreamingForwardCore(copy.deepcopy(upstream)).eval()
+
           with torch.no_grad():
-              stacked = torch.stack(parity_frames, dim=1)
-              reference = upstream(stacked).reshape(1, 15, ph * 4, pw * 4)
-          parity_model, _ = build_rewrite(ph, pw)
-          with torch.no_grad():
-              candidate = parity_model(*parity_frames)
-          max_abs = float((reference - candidate).abs().max())
-          mean_abs = float((reference - candidate).abs().mean())
-          if max_abs > 2e-5:
-              raise RuntimeError(f'Exact rewrite parity failed: max_abs={max_abs} mean_abs={mean_abs}')
+              f = [upstream.feat_extract(x) for x in frames]
+              p0 = upstream.forward_net(f[0])
+              p1 = upstream.forward_net(f[1] + p0)
+              p2 = upstream.forward_net(f[2] + p1)
+              b4 = upstream.backward_net(f[4])
+              b3 = upstream.backward_net(f[3] + b4)
+              b2 = upstream.backward_net(f[2] + b3)
+              ref_bidir = upstream.fusion(torch.cat((p2, b2), dim=1))
+              got_bidir = bidir(*frames)
+
+              ref_stream = upstream.forward_net(upstream.feat_extract(frames[0]) + state)
+              got_stream = stream(frames[0], state)
+
+          bidir_max = float((ref_bidir - got_bidir).abs().max())
+          stream_max = float((ref_stream - got_stream).abs().max())
+          if bidir_max > 1e-6 or stream_max > 1e-6:
+              raise RuntimeError(f'LR core parity failed: bidir={bidir_max} stream={stream_max}')
 
           report = {
               'upstream': 'NanoVSR-226k v1.0',
               'num_feat': num_feat,
               'num_blocks': num_blocks,
-              'rewrite': 'rank5->five 4D inputs; PixelShuffle->one-hot ConvTranspose->ZeroStuffConvT2d',
-              'parity_shape': [1, 5, 3, ph, pw],
-              'max_abs_error': max_abs,
-              'mean_abs_error': mean_abs,
-              'toolkit_commit': 'c9f725d6feb02ef3c1c60f12ee6a4e0228909215',
+              'bidir_center_max_abs_error': bidir_max,
+              'stream_forward_max_abs_error': stream_max,
+              'removed_for_probe': ['upsample1', 'upsample2', 'conv_last', 'x4 bilinear residual base'],
+              'purpose': 'measure LR temporal brain cost before designing a lightweight reconstruction head',
           }
-          with open('/tmp/nanovsr_exact_rewrite_report.json', 'w') as f:
+          with open('/tmp/nanovsr_lr_core_report.json', 'w') as f:
               json.dump(report, f, indent=2)
           print(json.dumps(report, indent=2))
 
-          for h, w in ((32, 32), (64, 64), (96, 160), (180, 320)):
-              model, frames = build_rewrite(h, w)
-              edge = litert_torch.convert(model, frames)
-              path = os.path.join(out_dir, f'nanovsr_exact4d_t5_{h}x{w}.tflite')
-              edge.export(path)
-              print(path, os.path.getsize(path))
+          for h, w in ((96, 160), (180, 320)):
+              frames = tuple(torch.zeros(1, 3, h, w, dtype=torch.float32) for _ in range(5))
+              export(
+                  f'nanovsr_core_bidir_t5_{h}x{w}.tflite',
+                  BidirCenterCore(copy.deepcopy(upstream)),
+                  frames,
+              )
+              export(
+                  f'nanovsr_core_stream_{h}x{w}.tflite',
+                  StreamingForwardCore(copy.deepcopy(upstream)),
+                  (
+                      torch.zeros(1, 3, h, w, dtype=torch.float32),
+                      torch.zeros(1, num_feat, h, w, dtype=torch.float32),
+                  ),
+              )
           PY
 
-          sha256sum app/src/main/assets/nanovsr_exact4d_t5_*.tflite | tee /tmp/exact_gpu_models.sha256
+          sha256sum app/src/main/assets/nanovsr_core_*.tflite | tee /tmp/lr_core_models.sha256
 
-      - name: Switch build to standalone exact GPU rewrite package
+      - name: Switch build to standalone LR-core package
         shell: bash
         run: |
           set -euo pipefail
           cp diagnostics/nanovsr/AndroidManifest.xml app/src/main/AndroidManifest.xml
-          sed -i 's/applicationId = "com.haggag.videoenhancer"/applicationId = "com.haggag.videoenhancer.exactgpu"/' app/build.gradle.kts
-          sed -i 's/versionName = "2.0.0-ai"/versionName = "3.0.3-exact-gpu-rewrite"/' app/build.gradle.kts
+          sed -i 's/applicationId = "com.haggag.videoenhancer"/applicationId = "com.haggag.videoenhancer.lrcore"/' app/build.gradle.kts
+          sed -i 's/versionName = "2.0.0-ai"/versionName = "3.0.4-lr-core"/' app/build.gradle.kts
 
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
@@ -224,28 +222,28 @@ jobs:
       - name: Build diagnostic APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify diagnostic APK contains exact rewrites
+      - name: Verify diagnostic APK contains LR-core models
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           for asset in \
-            nanovsr_exact4d_t5_32x32.tflite \
-            nanovsr_exact4d_t5_64x64.tflite \
-            nanovsr_exact4d_t5_96x160.tflite \
-            nanovsr_exact4d_t5_180x320.tflite; do
+            nanovsr_core_bidir_t5_96x160.tflite \
+            nanovsr_core_bidir_t5_180x320.tflite \
+            nanovsr_core_stream_96x160.tflite \
+            nanovsr_core_stream_180x320.tflite; do
               unzip -l "$APK" | grep -F "assets/$asset"
           done
           unzip -t "$APK" >/dev/null
-          sha256sum "$APK" | tee /tmp/temporal_ai_exact_gpu_apk.sha256
+          sha256sum "$APK" | tee /tmp/temporal_ai_lr_core_apk.sha256
 
-      - name: Upload Exact NanoVSR GPU Rewrite APK
+      - name: Upload NanoVSR LR Temporal-Core APK
         uses: actions/upload-artifact@v4
         with:
-          name: Temporal-AI-NanoVSR-Exact-GPU-Rewrite
+          name: Temporal-AI-NanoVSR-LR-Core
           path: |
             app/build/outputs/apk/debug/app-debug.apk
-            /tmp/nanovsr_exact_rewrite_report.json
-            /tmp/exact_gpu_models.sha256
-            /tmp/temporal_ai_exact_gpu_apk.sha256
+            /tmp/nanovsr_lr_core_report.json
+            /tmp/lr_core_models.sha256
+            /tmp/temporal_ai_lr_core_apk.sha256
           if-no-files-found: error
