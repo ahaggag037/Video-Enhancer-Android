@@ -1,4 +1,4 @@
-name: Build Temporal AI GPU Isolation APK
+name: Build Temporal AI 4D-Core GPU APK
 
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  build-gpu-isolation-apk:
+  build-core4d-gpu-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -57,7 +57,7 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0'
           python -m pip install 'litert-torch==0.9.4' 'ai-edge-litert' numpy
 
-      - name: Build GPU isolation models
+      - name: Build 4D temporal core and GPU-safe head probes
         shell: bash
         run: |
           set -euo pipefail
@@ -79,61 +79,40 @@ jobs:
           out_dir = 'app/src/main/assets'
           os.makedirs(out_dir, exist_ok=True)
 
-          def export(name, model, sample):
+          def export(name, model, samples):
               model.eval()
-              edge = litert_torch.convert(model, (sample,))
+              args = samples if isinstance(samples, tuple) else (samples,)
+              edge = litert_torch.convert(model, args)
               path = os.path.join(out_dir, name)
               edge.export(path)
               print(name, os.path.getsize(path))
 
-          class ConvLeaky(nn.Module):
+          class TransposeConvProbe(nn.Module):
               def __init__(self):
                   super().__init__()
-                  self.conv = nn.Conv2d(3, 8, 3, padding=1)
+                  self.deconv = nn.ConvTranspose2d(3, 3, 4, stride=2, padding=1)
               def forward(self, x):
-                  return F.leaky_relu(self.conv(x), negative_slope=0.1)
+                  return self.deconv(x)
 
-          class PreluProbe(nn.Module):
+          class ResizeConvHeadProbe(nn.Module):
               def __init__(self):
                   super().__init__()
-                  self.prelu = nn.PReLU(num_parameters=3)
+                  self.conv = nn.Conv2d(32, 32, 3, padding=1)
+                  self.prelu = nn.PReLU(num_parameters=32)
               def forward(self, x):
-                  return self.prelu(x)
+                  x = F.interpolate(x, scale_factor=2.0, mode='bilinear', align_corners=False)
+                  return self.prelu(self.conv(x))
 
-          class PixelShuffleProbe(nn.Module):
-              def __init__(self):
-                  super().__init__()
-                  self.conv = nn.Conv2d(3, 12, 3, padding=1)
-                  self.shuffle = nn.PixelShuffle(2)
-              def forward(self, x):
-                  return self.shuffle(self.conv(x))
-
-          class ResizeProbe(nn.Module):
-              def forward(self, x):
-                  return F.interpolate(x, scale_factor=4.0, mode='bilinear', align_corners=False)
-
-          class ConcatProbe(nn.Module):
-              def __init__(self):
-                  super().__init__()
-                  self.fuse = nn.Conv2d(6, 3, 1)
-              def forward(self, x):
-                  return self.fuse(torch.cat((x, x), dim=1))
-
-          class Rank5TemporalGatherProbe(nn.Module):
-              def __init__(self):
-                  super().__init__()
-                  self.fuse = nn.Conv2d(6, 3, 1)
-              def forward(self, x):
-                  a = x[:, 0, :, :, :]
-                  b = x[:, 1, :, :, :]
-                  return self.fuse(torch.cat((a, b), dim=1))
-
-          export('probe_conv_leaky.tflite', ConvLeaky(), torch.zeros(1, 3, 64, 64))
-          export('probe_prelu.tflite', PreluProbe(), torch.zeros(1, 3, 64, 64))
-          export('probe_pixelshuffle.tflite', PixelShuffleProbe(), torch.zeros(1, 3, 64, 64))
-          export('probe_resize.tflite', ResizeProbe(), torch.zeros(1, 3, 32, 32))
-          export('probe_concat.tflite', ConcatProbe(), torch.zeros(1, 3, 64, 64))
-          export('probe_rank5_gather.tflite', Rank5TemporalGatherProbe(), torch.zeros(1, 5, 3, 32, 32))
+          export(
+              'probe_transposeconv_x2.tflite',
+              TransposeConvProbe(),
+              torch.zeros(1, 3, 32, 32),
+          )
+          export(
+              'probe_resizeconv_head.tflite',
+              ResizeConvHeadProbe(),
+              torch.zeros(1, 32, 32, 32),
+          )
 
           sys.path.insert(0, '/tmp/nanovsr')
           from models.nanovsr import NanoVSR
@@ -152,28 +131,73 @@ jobs:
               if key.startswith('forward_net.') and key.split('.')[1].isdigit()
           }
           num_blocks = max(indices) + 1
-          model = NanoVSR(num_feat=num_feat, num_blocks=num_blocks)
-          model.load_state_dict(checkpoint, strict=True)
-          model.switch_to_deploy()
-          model.eval()
+          upstream = NanoVSR(num_feat=num_feat, num_blocks=num_blocks)
+          upstream.load_state_dict(checkpoint, strict=True)
+          upstream.switch_to_deploy()
+          upstream.eval()
 
+          class NanoVSRCore4D(nn.Module):
+              """Exact upstream LR temporal recurrence/fusion, no rank-5 tensor and no HR head."""
+              def __init__(self, model):
+                  super().__init__()
+                  self.feat_extract = model.feat_extract
+                  self.forward_net = model.forward_net
+                  self.backward_net = model.backward_net
+                  self.fusion = model.fusion
+
+              def forward(self, x0, x1, x2, x3, x4):
+                  f0 = self.feat_extract(x0)
+                  f1 = self.feat_extract(x1)
+                  f2 = self.feat_extract(x2)
+                  f3 = self.feat_extract(x3)
+                  f4 = self.feat_extract(x4)
+
+                  p0 = self.forward_net(f0)
+                  p1 = self.forward_net(f1 + p0)
+                  p2 = self.forward_net(f2 + p1)
+                  p3 = self.forward_net(f3 + p2)
+                  p4 = self.forward_net(f4 + p3)
+
+                  b4 = self.backward_net(f4)
+                  b3 = self.backward_net(f3 + b4)
+                  b2 = self.backward_net(f2 + b3)
+                  b1 = self.backward_net(f1 + b2)
+                  b0 = self.backward_net(f0 + b1)
+
+                  o0 = self.fusion(torch.cat((p0, b0), dim=1))
+                  o1 = self.fusion(torch.cat((p1, b1), dim=1))
+                  o2 = self.fusion(torch.cat((p2, b2), dim=1))
+                  o3 = self.fusion(torch.cat((p3, b3), dim=1))
+                  o4 = self.fusion(torch.cat((p4, b4), dim=1))
+                  # One 4D output keeps the runtime graph rank <= 4 while preserving all five fused features.
+                  return torch.cat((o0, o1, o2, o3, o4), dim=1)
+
+          core = NanoVSRCore4D(upstream)
           for h, w in ((32, 32), (64, 64), (96, 160), (180, 320)):
+              frames = tuple(
+                  torch.zeros(1, 3, h, w, dtype=torch.float32)
+                  for _ in range(5)
+              )
               export(
-                  f'nanovsr_226k_t5_{h}x{w}.tflite',
-                  model,
-                  torch.zeros(1, 5, 3, h, w, dtype=torch.float32),
+                  f'nanovsr_core4d_t5_{h}x{w}.tflite',
+                  core,
+                  frames,
               )
           PY
 
-          sha256sum app/src/main/assets/probe_*.tflite app/src/main/assets/nanovsr_226k_t5_*.tflite | tee /tmp/gpu_isolation_models.sha256
+          sha256sum \
+            app/src/main/assets/probe_transposeconv_x2.tflite \
+            app/src/main/assets/probe_resizeconv_head.tflite \
+            app/src/main/assets/nanovsr_core4d_t5_*.tflite \
+            | tee /tmp/core4d_gpu_models.sha256
 
-      - name: Switch build to standalone GPU isolation package
+      - name: Switch build to standalone 4D-core GPU package
         shell: bash
         run: |
           set -euo pipefail
           cp diagnostics/nanovsr/AndroidManifest.xml app/src/main/AndroidManifest.xml
-          sed -i 's/applicationId = "com.haggag.videoenhancer"/applicationId = "com.haggag.videoenhancer.gpuisolation"/' app/build.gradle.kts
-          sed -i 's/versionName = "2.0.0-ai"/versionName = "3.0.1-gpu-isolation"/' app/build.gradle.kts
+          sed -i 's/applicationId = "com.haggag.videoenhancer"/applicationId = "com.haggag.videoenhancer.coregpu"/' app/build.gradle.kts
+          sed -i 's/versionName = "2.0.0-ai"/versionName = "3.0.2-core4d-gpu"/' app/build.gradle.kts
 
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
@@ -181,33 +205,29 @@ jobs:
       - name: Build diagnostic APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify diagnostic APK contains all probes
+      - name: Verify diagnostic APK contains all rewrite probes
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           for asset in \
-            probe_conv_leaky.tflite \
-            probe_prelu.tflite \
-            probe_pixelshuffle.tflite \
-            probe_resize.tflite \
-            probe_concat.tflite \
-            probe_rank5_gather.tflite \
-            nanovsr_226k_t5_32x32.tflite \
-            nanovsr_226k_t5_64x64.tflite \
-            nanovsr_226k_t5_96x160.tflite \
-            nanovsr_226k_t5_180x320.tflite; do
+            probe_transposeconv_x2.tflite \
+            probe_resizeconv_head.tflite \
+            nanovsr_core4d_t5_32x32.tflite \
+            nanovsr_core4d_t5_64x64.tflite \
+            nanovsr_core4d_t5_96x160.tflite \
+            nanovsr_core4d_t5_180x320.tflite; do
               unzip -l "$APK" | grep -F "assets/$asset"
           done
           unzip -t "$APK" >/dev/null
-          sha256sum "$APK" | tee /tmp/temporal_ai_gpu_isolation_apk.sha256
+          sha256sum "$APK" | tee /tmp/temporal_ai_core4d_apk.sha256
 
-      - name: Upload Temporal AI GPU Isolation APK
+      - name: Upload Temporal AI 4D-Core GPU APK
         uses: actions/upload-artifact@v4
         with:
-          name: Temporal-AI-GPU-Isolation-Android
+          name: Temporal-AI-NanoVSR-4D-Core-GPU
           path: |
             app/build/outputs/apk/debug/app-debug.apk
-            /tmp/gpu_isolation_models.sha256
-            /tmp/temporal_ai_gpu_isolation_apk.sha256
+            /tmp/core4d_gpu_models.sha256
+            /tmp/temporal_ai_core4d_apk.sha256
           if-no-files-found: error
