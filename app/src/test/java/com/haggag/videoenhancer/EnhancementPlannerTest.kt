@@ -1,6 +1,7 @@
 package com.haggag.videoenhancer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EnhancementPlannerTest {
@@ -57,6 +58,36 @@ class EnhancementPlannerTest {
         )
 
         assertEquals(EnhancementPlanner.Path.AI_DETAIL, plan.path)
+    }
+
+    @Test
+    fun smart_uses_measured_fast_neural_runtime_for_short_clip() {
+        val plan = EnhancementPlanner.plan(
+            sourceWidth = 640,
+            sourceHeight = 360,
+            frameCount = 90,
+            outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
+            engineChoice = EnhancementPlanner.EngineChoice.SMART,
+            neuralMsPerTile = 2.0
+        )
+
+        assertEquals(EnhancementPlanner.Path.AI_DETAIL, plan.path)
+        assertTrue((plan.estimatedNeuralMs ?: Long.MAX_VALUE) < 30_000L)
+    }
+
+    @Test
+    fun smart_rejects_neural_path_when_device_benchmark_predicts_long_wait() {
+        val plan = EnhancementPlanner.plan(
+            sourceWidth = 640,
+            sourceHeight = 360,
+            frameCount = 90,
+            outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
+            engineChoice = EnhancementPlanner.EngineChoice.SMART,
+            neuralMsPerTile = 20.0
+        )
+
+        assertEquals(EnhancementPlanner.Path.FAST_GPU, plan.path)
+        assertTrue((plan.estimatedNeuralMs ?: 0L) > 30_000L)
     }
 
     @Test
