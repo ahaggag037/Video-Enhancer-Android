@@ -64,6 +64,6 @@ class EnhancementPlannerTest {
         )
 
         assertEquals(2560, size.width)
-        assertEquals(1440, size.height % 2)
+        assertEquals(0, size.height % 2)
     }
 }
