@@ -14,7 +14,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Video Enhancer"
+            android:text="Video Enhancer AI V2"
             android:textColor="#FFFFFF"
             android:textSize="28sp"
             android:textStyle="bold" />
@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="GPU enhancement + high-quality Lanczos scaling"
+            android:text="Adaptive on-device VDSR AI + fast GPU export"
             android:textColor="#AEB4C0"
             android:textSize="14sp" />
 
@@ -47,6 +47,19 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
+            android:text="Enhancement engine"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/engineSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="52dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
             android:text="Enhancement preset"
             android:textColor="#FFFFFF"
             android:textStyle="bold" />
@@ -124,10 +137,13 @@
 
         <ProgressBar
             android:id="@+id/progressBar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
             android:layout_marginTop="18dp"
+            android:indeterminate="false"
+            android:max="100"
+            android:progress="0"
             android:visibility="gone" />
 
         <TextView
@@ -145,7 +161,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
             android:layout_marginBottom="20dp"
-            android:text="V1 performs deterministic GPU enhancement and high-quality resampling. Neural super-resolution/denoise will be added as a separate on-device engine so the app does not pretend ordinary scaling can recreate missing detail."
+            android:text="Auto uses local VDSR neural detail recovery for low-resolution upscales, then finishes with the shortest GPU pipeline needed. Fast GPU skips AI. Local AI forces VDSR when the device codec supports flexible YUV processing."
             android:textColor="#7F8796"
             android:textSize="12sp" />
 
