@@ -28,12 +28,18 @@ class NanoVsrBenchmarkActivity : AppCompatActivity() {
         result = findViewById(R.id.benchmarkResult)
         deviceText = findViewById(R.id.deviceText)
 
-        deviceText.text = "${Build.MANUFACTURER} ${Build.MODEL} • Android ${Build.VERSION.RELEASE} • API ${Build.VERSION.SDK_INT}"
+        deviceText.text = buildString {
+            append("${Build.MANUFACTURER} ${Build.MODEL} • Android ${Build.VERSION.RELEASE} • API ${Build.VERSION.SDK_INT}")
+            append("\nHardware ${Build.HARDWARE} • Board ${Build.BOARD}")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                append("\nSoC ${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}")
+            }
+        }
 
-        if (!NanoVsrDeviceBenchmark.assetAvailable(this)) {
+        if (!NanoVsrDeviceBenchmark.assetsAvailable(this)) {
             runButton.isEnabled = false
-            status.text = "NanoVSR diagnostic model is not packaged in this build"
-            result.text = "Use the dedicated Temporal AI benchmark APK."
+            status.text = "GPU isolation models are not packaged in this build"
+            result.text = "Use the dedicated Temporal AI GPU Isolation APK."
         }
 
         runButton.setOnClickListener {
@@ -45,29 +51,35 @@ class NanoVsrBenchmarkActivity : AppCompatActivity() {
         running = true
         runButton.isEnabled = false
         progress.visibility = View.VISIBLE
-        status.text = "Running NanoVSR on GPU, then bounded CPU fallback…"
-        result.text = "Benchmark in progress. The CPU test automatically stops early if it is very slow."
+        status.text = "Starting GPU isolation matrix…"
+        result.text = "Testing primitive operators, rank-5 temporal indexing, then NanoVSR at increasing shapes. CPU is intentionally skipped."
 
         val thermalBefore = thermalStatus()
         Thread({
-            val measured = runCatching { NanoVsrDeviceBenchmark.measure(applicationContext) }
+            val measured = runCatching {
+                NanoVsrDeviceBenchmark.measure(applicationContext) { completed, total, label ->
+                    runOnUiThread {
+                        status.text = "GPU isolation $completed/$total • $label"
+                    }
+                }
+            }
             val thermalAfter = thermalStatus()
             runOnUiThread {
                 running = false
                 runButton.isEnabled = true
                 progress.visibility = View.GONE
                 measured.onSuccess { benchmark ->
-                    status.text = "Benchmark finished"
+                    status.text = "GPU isolation finished • ${benchmark.passed} pass / ${benchmark.failed} fail"
                     result.text = buildString {
                         append(benchmark.format())
                         append("\nThermal status: $thermalBefore → $thermalAfter")
                     }
                 }.onFailure { error ->
-                    status.text = "Benchmark failed"
+                    status.text = "GPU isolation failed before probes completed"
                     result.text = error.message ?: error.javaClass.simpleName
                 }
             }
-        }, "nanovsr-device-benchmark").start()
+        }, "nanovsr-gpu-isolation").start()
     }
 
     private fun thermalStatus(): Int {

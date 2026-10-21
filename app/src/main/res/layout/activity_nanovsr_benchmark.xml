@@ -14,7 +14,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Temporal AI Lab"
+            android:text="Temporal AI GPU Isolation"
             android:textColor="#FFFFFF"
             android:textSize="28sp"
             android:textStyle="bold" />
@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="NanoVSR-226k feasibility benchmark — this does not export video. It measures the candidate temporal model on this phone before we allow it into Smart mode."
+            android:text="The first real-device run showed that full NanoVSR could not compile on this phone GPU. This diagnostic isolates the cause instead of guessing: primitive ops, rank-5 temporal indexing, then the full graph at increasing input sizes."
             android:textColor="#AEB4C0"
             android:textSize="14sp" />
 
@@ -33,6 +33,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="22dp"
             android:textColor="#D7DBE4"
+            android:textIsSelectable="true"
             android:textSize="14sp" />
 
         <Button
@@ -40,7 +41,7 @@
             android:layout_width="match_parent"
             android:layout_height="60dp"
             android:layout_marginTop="22dp"
-            android:text="Run temporal AI benchmark" />
+            android:text="Run GPU isolation matrix" />
 
         <ProgressBar
             android:id="@+id/benchmarkProgress"
@@ -67,7 +68,7 @@
             android:layout_marginTop="20dp"
             android:background="#191B20"
             android:padding="16dp"
-            android:text="No benchmark yet"
+            android:text="No isolation run yet"
             android:textColor="#FFFFFF"
             android:textIsSelectable="true"
             android:textSize="14sp" />
@@ -77,7 +78,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:layout_marginBottom="20dp"
-            android:text="Decision rule: conversion success alone is not enough. We will only integrate this model after real-device GPU/CPU results and later an end-to-end video benchmark including decode, temporal inference, GPU composition, encode and thermal stability."
+            android:text="This build does not export video and does not rerun the known-slow CPU path. A passing primitive matrix is not product approval; it only tells us which GPU boundary fails so the next architecture change can target the root cause."
             android:textColor="#858D9C"
             android:textSize="12sp" />
 

@@ -5,119 +5,109 @@ import com.google.ai.edge.litert.Accelerator
 import java.util.Locale
 
 /**
- * Diagnostic-only feasibility benchmark for the converted NanoVSR-226k model.
- * It measures CompiledModel execution without CPU output readback so the number
- * is closer to a future GPU/NPU-resident video pipeline than Bitmap processing.
+ * GPU isolation matrix for NanoVSR feasibility.
+ *
+ * The first real-device run proved that the full 5x180x320 NanoVSR graph cannot
+ * compile on the tested phone GPU while CPU inference is far too slow. This
+ * probe intentionally avoids any product-path changes and isolates the failure
+ * to individual operator families, rank-5 temporal indexing, or graph/shape size.
  */
 object NanoVsrDeviceBenchmark {
-    const val ASSET_NAME = "nanovsr_226k_t5_180x320.tflite"
-    private const val TEMPORAL_WINDOW = 5
-    private const val INPUT_HEIGHT = 180
-    private const val INPUT_WIDTH = 320
-    private const val CHANNELS = 3
-    private const val GPU_TIMED_RUNS = 3
-    private const val CPU_TIMED_RUNS = 2
-    private const val SLOW_CPU_WARMUP_MS = 5_000.0
+
+    private data class ProbeSpec(
+        val label: String,
+        val assetName: String,
+        val inputElements: Int
+    )
 
     data class Entry(
-        val accelerator: Accelerator,
-        val loadMs: Double? = null,
-        val medianWindowMs: Double? = null,
-        val modelOnlyFps: Double? = null,
-        val samples: Int = 0,
+        val label: String,
+        val compileMs: Double? = null,
+        val invokeMs: Double? = null,
         val error: String? = null
     )
 
     data class Result(val entries: List<Entry>) {
+        val passed: Int get() = entries.count { it.error == null }
+        val failed: Int get() = entries.size - passed
+
         fun format(): String = buildString {
-            append("NanoVSR-226k • 5×180×320 → 5×720×1280\n")
+            append("GPU isolation matrix • LiteRT CompiledModel\n")
+            append("PASS $passed / ${entries.size} • FAIL $failed\n\n")
             entries.forEachIndexed { index, entry ->
-                if (index > 0) append('\n')
-                append(entry.accelerator.name)
-                if (entry.error != null) {
-                    append(" unavailable • ")
-                    append(entry.error.take(180))
+                if (index > 0) append("\n")
+                append(if (entry.error == null) "PASS • " else "FAIL • ")
+                append(entry.label)
+                if (entry.error == null) {
+                    append(String.format(Locale.US, " • compile %.0f ms", entry.compileMs))
+                    append(String.format(Locale.US, " • first invoke %.1f ms", entry.invokeMs))
                 } else {
-                    append(String.format(Locale.US, " • load %.0f ms", entry.loadMs))
-                    append(String.format(Locale.US, " • %.1f ms/window", entry.medianWindowMs))
-                    append(String.format(Locale.US, " • model-only %.1f fps", entry.modelOnlyFps))
-                    append(" • n=${entry.samples}")
+                    append("\n  ")
+                    append(entry.error)
                 }
             }
-            append("\nModel-only benchmark; decode/compose/encode are not included.")
+            append("\n\nInterpretation:\n")
+            append("• Primitive FAIL => unsupported GPU operator/runtime path.\n")
+            append("• Primitives PASS + Rank5 FAIL => temporal tensor/indexing limitation.\n")
+            append("• Small NanoVSR PASS + large FAIL => shape/resource threshold.\n")
+            append("• All small probes PASS + all NanoVSR FAIL => composite graph/backend limitation.\n")
+            append("CPU is not rerun here; the previous real-device result was ~22.48 s per 5-frame window (0.2 fps).")
         }
     }
 
-    fun assetAvailable(context: Context): Boolean = runCatching {
-        context.assets.open(ASSET_NAME).use { }
-        true
-    }.getOrDefault(false)
+    private val probes = listOf(
+        ProbeSpec("Conv + LeakyReLU (4D)", "probe_conv_leaky.tflite", 1 * 3 * 64 * 64),
+        ProbeSpec("PReLU (4D)", "probe_prelu.tflite", 1 * 3 * 64 * 64),
+        ProbeSpec("PixelShuffle x2 / DepthToSpace (4D)", "probe_pixelshuffle.tflite", 1 * 3 * 64 * 64),
+        ProbeSpec("Bilinear Resize x4 (4D)", "probe_resize.tflite", 1 * 3 * 32 * 32),
+        ProbeSpec("Concat + 1x1 Conv (4D)", "probe_concat.tflite", 1 * 3 * 64 * 64),
+        ProbeSpec("Rank-5 temporal gather + fusion", "probe_rank5_gather.tflite", 1 * 5 * 3 * 32 * 32),
+        ProbeSpec("NanoVSR full graph • 5x32x32", "nanovsr_226k_t5_32x32.tflite", 1 * 5 * 3 * 32 * 32),
+        ProbeSpec("NanoVSR full graph • 5x64x64", "nanovsr_226k_t5_64x64.tflite", 1 * 5 * 3 * 64 * 64),
+        ProbeSpec("NanoVSR full graph • 5x96x160", "nanovsr_226k_t5_96x160.tflite", 1 * 5 * 3 * 96 * 160),
+        ProbeSpec("NanoVSR full graph • 5x180x320", "nanovsr_226k_t5_180x320.tflite", 1 * 5 * 3 * 180 * 320)
+    )
+
+    fun assetsAvailable(context: Context): Boolean = probes.all { spec ->
+        runCatching {
+            context.assets.open(spec.assetName).use { }
+            true
+        }.getOrDefault(false)
+    }
 
     /** Blocking. Must run on a worker thread. */
-    fun measure(context: Context): Result {
-        require(assetAvailable(context)) { "NanoVSR diagnostic asset is not packaged in this build" }
-        val input = FloatArray(TEMPORAL_WINDOW * CHANNELS * INPUT_HEIGHT * INPUT_WIDTH) { index ->
-            ((index * 37) % 251) / 250f
-        }
+    fun measure(
+        context: Context,
+        onProgress: (completed: Int, total: Int, label: String) -> Unit = { _, _, _ -> }
+    ): Result {
+        require(assetsAvailable(context)) { "GPU isolation assets are not packaged in this build" }
+        val appContext = context.applicationContext
+        val entries = ArrayList<Entry>(probes.size)
 
-        val entries = listOf(Accelerator.GPU, Accelerator.CPU).map { accelerator ->
-            measureOne(context.applicationContext, accelerator, input)
+        probes.forEachIndexed { index, spec ->
+            onProgress(index, probes.size, spec.label)
+            entries += measureGpu(appContext, spec)
+            onProgress(index + 1, probes.size, spec.label)
         }
         return Result(entries)
     }
 
-    private fun measureOne(
-        context: Context,
-        accelerator: Accelerator,
-        input: FloatArray
-    ): Entry {
+    private fun measureGpu(context: Context, spec: ProbeSpec): Entry {
         var runner: LiteRtModelRunner? = null
         return try {
-            val loadStart = System.nanoTime()
-            runner = LiteRtModelRunner.fromAssets(context, ASSET_NAME, accelerator)
-            val loadMs = elapsedMs(loadStart)
+            val compileStart = System.nanoTime()
+            runner = LiteRtModelRunner.fromAssets(context, spec.assetName, Accelerator.GPU)
+            val compileMs = elapsedMs(compileStart)
 
+            val input = FloatArray(spec.inputElements) { index -> ((index * 37) % 251) / 250f }
             runner.writeInput(input)
-            val warmupStart = System.nanoTime()
+            val invokeStart = System.nanoTime()
             runner.invoke()
-            val warmupMs = elapsedMs(warmupStart)
+            val invokeMs = elapsedMs(invokeStart)
 
-            if (accelerator == Accelerator.CPU && warmupMs >= SLOW_CPU_WARMUP_MS) {
-                return Entry(
-                    accelerator = accelerator,
-                    loadMs = loadMs,
-                    medianWindowMs = warmupMs,
-                    modelOnlyFps = TEMPORAL_WINDOW * 1000.0 / warmupMs,
-                    samples = 1
-                )
-            }
-
-            val runCount = if (accelerator == Accelerator.GPU) GPU_TIMED_RUNS else CPU_TIMED_RUNS
-            val timings = DoubleArray(runCount)
-            repeat(runCount) { index ->
-                val started = System.nanoTime()
-                runner.invoke()
-                timings[index] = elapsedMs(started)
-            }
-            timings.sort()
-            val median = if (timings.size % 2 == 1) {
-                timings[timings.size / 2]
-            } else {
-                (timings[timings.size / 2 - 1] + timings[timings.size / 2]) / 2.0
-            }
-            val fps = TEMPORAL_WINDOW * 1000.0 / median
-            Entry(
-                accelerator = accelerator,
-                loadMs = loadMs,
-                medianWindowMs = median,
-                modelOnlyFps = fps,
-                samples = runCount
-            )
+            Entry(spec.label, compileMs = compileMs, invokeMs = invokeMs)
         } catch (failure: Throwable) {
-            Entry(
-                accelerator = accelerator,
-                error = compactError(failure)
-            )
+            Entry(spec.label, error = errorChain(failure))
         } finally {
             runCatching { runner?.close() }
         }
@@ -126,8 +116,21 @@ object NanoVsrDeviceBenchmark {
     private fun elapsedMs(startNanos: Long): Double =
         (System.nanoTime() - startNanos) / 1_000_000.0
 
-    private fun compactError(error: Throwable): String {
-        val message = error.message?.replace('\n', ' ')?.trim().orEmpty()
-        return if (message.isNotEmpty()) message else error.javaClass.simpleName
+    private fun errorChain(error: Throwable): String {
+        val parts = ArrayList<String>()
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth < 6) {
+            val message = current.message?.replace('\n', ' ')?.trim().orEmpty()
+            val part = if (message.isEmpty()) {
+                current.javaClass.simpleName
+            } else {
+                "${current.javaClass.simpleName}: $message"
+            }
+            if (parts.lastOrNull() != part) parts += part
+            current = current.cause
+            depth++
+        }
+        return parts.joinToString(" <- ").take(700)
     }
 }
