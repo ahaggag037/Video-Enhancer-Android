@@ -5,14 +5,17 @@ import com.google.ai.edge.litert.Accelerator
 import java.util.Locale
 
 /**
- * Second-stage NanoVSR GPU feasibility matrix.
+ * Exact NanoVSR GPU rewrite benchmark.
  *
- * The first device matrix proved two independent LiteRT GPU blockers on the
- * tested Snapdragon 680 / Adreno 610 phone: DepthToSpace (PixelShuffle) and
- * rank-5 temporal gather. This matrix removes both blockers independently and
- * asks a narrower question: can the genuine NanoVSR low-resolution recurrent
- * brain run fast on GPU if temporal frames are exposed as five ordinary 4D
- * inputs, and which GPU-friendly high-resolution head family is viable?
+ * This build keeps the released NanoVSR-226k weights and temporal recurrence but
+ * removes the two operators proven incompatible on the test device:
+ *  1) rank-5 temporal gather -> five ordinary 4D inputs with an unrolled recurrence;
+ *  2) PixelShuffle/DepthToSpace -> exact one-hot deconvolution, then exact
+ *     zero-stuff ResizeNearest+Mul+Conv2D lowering.
+ *
+ * The conversion workflow performs a CPU parity assertion against upstream
+ * NanoVSR before this APK is produced. This class only measures real-device GPU
+ * compile and execution.
  */
 object NanoVsrDeviceBenchmark {
 
@@ -20,13 +23,15 @@ object NanoVsrDeviceBenchmark {
         val label: String,
         val assetName: String,
         val inputElementsPerBuffer: Int,
-        val inputCount: Int = 1
+        val inputCount: Int = 5,
+        val framesPerInvoke: Int = 5
     )
 
     data class Entry(
         val label: String,
         val compileMs: Double? = null,
         val invokeMs: Double? = null,
+        val effectiveFps: Double? = null,
         val error: String? = null
     )
 
@@ -35,7 +40,7 @@ object NanoVsrDeviceBenchmark {
         val failed: Int get() = entries.size - passed
 
         fun format(): String = buildString {
-            append("NanoVSR GPU rewrite matrix • LiteRT CompiledModel\n")
+            append("Exact NanoVSR GPU rewrite • LiteRT CompiledModel\n")
             append("PASS $passed / ${entries.size} • FAIL $failed\n\n")
             entries.forEachIndexed { index, entry ->
                 if (index > 0) append("\n")
@@ -44,55 +49,40 @@ object NanoVsrDeviceBenchmark {
                 if (entry.error == null) {
                     append(String.format(Locale.US, " • compile %.0f ms", entry.compileMs))
                     append(String.format(Locale.US, " • first invoke %.1f ms", entry.invokeMs))
+                    append(String.format(Locale.US, " • model-only %.1f fps", entry.effectiveFps))
                 } else {
                     append("\n  ")
                     append(entry.error)
                 }
             }
-            append("\n\nDecision guide:\n")
-            append("• 4D core PASS => keep NanoVSR temporal recurrence; replace only the HR head.\n")
-            append("• 4D core FAIL at every size => abandon LiteRT NanoVSR on this GPU.\n")
-            append("• TransposeConv PASS => learned x2 head can avoid PixelShuffle.\n")
-            append("• Resize+Conv PASS => retrain/distill a GPU-safe residual head.\n")
-            append("• Small core PASS + large core FAIL => tile the LR temporal core, not HR output.\n")
-            append("This probe does not rerun the known-slow CPU path.")
+            append("\n\nInterpretation:\n")
+            append("• PASS means the exact-weight rewrite compiles and executes on this GPU.\n")
+            append("• The reported fps is model-only for five frames; decode/compose/encode are not included.\n")
+            append("• If 180x320 is too slow but smaller sizes are fast, Smart can run the temporal brain at a smaller LR scale and let the final GPU compositor reach the target resolution.\n")
+            append("• If all sizes fail, this LiteRT GPU route is rejected for this device family.")
         }
     }
 
     private val probes = listOf(
         ProbeSpec(
-            "TransposeConv x2 candidate head (4D)",
-            "probe_transposeconv_x2.tflite",
+            "Exact rewrite • 5x32x32 -> 5x128x128",
+            "nanovsr_exact4d_t5_32x32.tflite",
             1 * 3 * 32 * 32
         ),
         ProbeSpec(
-            "Resize x2 + Conv + PReLU candidate head (4D)",
-            "probe_resizeconv_head.tflite",
-            1 * 32 * 32 * 32
+            "Exact rewrite • 5x64x64 -> 5x256x256",
+            "nanovsr_exact4d_t5_64x64.tflite",
+            1 * 3 * 64 * 64
         ),
         ProbeSpec(
-            "NanoVSR genuine temporal core • five 4D inputs • 32x32",
-            "nanovsr_core4d_t5_32x32.tflite",
-            1 * 3 * 32 * 32,
-            inputCount = 5
+            "Exact rewrite • 5x96x160 -> 5x384x640",
+            "nanovsr_exact4d_t5_96x160.tflite",
+            1 * 3 * 96 * 160
         ),
         ProbeSpec(
-            "NanoVSR genuine temporal core • five 4D inputs • 64x64",
-            "nanovsr_core4d_t5_64x64.tflite",
-            1 * 3 * 64 * 64,
-            inputCount = 5
-        ),
-        ProbeSpec(
-            "NanoVSR genuine temporal core • five 4D inputs • 96x160",
-            "nanovsr_core4d_t5_96x160.tflite",
-            1 * 3 * 96 * 160,
-            inputCount = 5
-        ),
-        ProbeSpec(
-            "NanoVSR genuine temporal core • five 4D inputs • 180x320",
-            "nanovsr_core4d_t5_180x320.tflite",
-            1 * 3 * 180 * 320,
-            inputCount = 5
+            "Exact rewrite • 5x180x320 -> 5x720x1280",
+            "nanovsr_exact4d_t5_180x320.tflite",
+            1 * 3 * 180 * 320
         )
     )
 
@@ -108,7 +98,7 @@ object NanoVsrDeviceBenchmark {
         context: Context,
         onProgress: (completed: Int, total: Int, label: String) -> Unit = { _, _, _ -> }
     ): Result {
-        require(assetsAvailable(context)) { "GPU rewrite probe assets are not packaged in this build" }
+        require(assetsAvailable(context)) { "Exact NanoVSR GPU rewrite assets are not packaged in this build" }
         val appContext = context.applicationContext
         val entries = ArrayList<Entry>(probes.size)
 
@@ -139,9 +129,17 @@ object NanoVsrDeviceBenchmark {
 
             val invokeStart = System.nanoTime()
             runner.invoke()
+            // GPU run() may enqueue work; force completion through one output read.
+            runner.readOutput()
             val invokeMs = elapsedMs(invokeStart)
+            val fps = spec.framesPerInvoke * 1000.0 / invokeMs
 
-            Entry(spec.label, compileMs = compileMs, invokeMs = invokeMs)
+            Entry(
+                spec.label,
+                compileMs = compileMs,
+                invokeMs = invokeMs,
+                effectiveFps = fps
+            )
         } catch (failure: Throwable) {
             Entry(spec.label, error = errorChain(failure))
         } finally {
