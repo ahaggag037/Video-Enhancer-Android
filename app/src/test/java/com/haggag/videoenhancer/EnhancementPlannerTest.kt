@@ -6,10 +6,11 @@ import org.junit.Test
 class EnhancementPlannerTest {
 
     @Test
-    fun smart_uses_ai_for_low_resolution_upscale() {
+    fun smart_uses_ai_for_short_low_resolution_upscale() {
         val plan = EnhancementPlanner.plan(
             sourceWidth = 640,
             sourceHeight = 360,
+            frameCount = 90,
             outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
             engineChoice = EnhancementPlanner.EngineChoice.SMART
         )
@@ -20,10 +21,11 @@ class EnhancementPlannerTest {
     }
 
     @Test
-    fun smart_uses_fast_path_when_source_is_already_large() {
+    fun smart_avoids_real_esrgan_for_long_240p_video() {
         val plan = EnhancementPlanner.plan(
-            sourceWidth = 1920,
-            sourceHeight = 1080,
+            sourceWidth = 426,
+            sourceHeight = 240,
+            frameCount = 20_214,
             outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
             engineChoice = EnhancementPlanner.EngineChoice.SMART
         )
@@ -32,11 +34,25 @@ class EnhancementPlannerTest {
     }
 
     @Test
-    fun explicit_ai_stays_ai_even_for_large_source() {
+    fun smart_uses_fast_path_when_source_is_already_large() {
         val plan = EnhancementPlanner.plan(
             sourceWidth = 1920,
             sourceHeight = 1080,
-            outputChoice = EnhancementPlanner.OutputChoice.ORIGINAL,
+            frameCount = 300,
+            outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
+            engineChoice = EnhancementPlanner.EngineChoice.SMART
+        )
+
+        assertEquals(EnhancementPlanner.Path.FAST_GPU, plan.path)
+    }
+
+    @Test
+    fun explicit_ai_stays_ai_even_for_long_video() {
+        val plan = EnhancementPlanner.plan(
+            sourceWidth = 640,
+            sourceHeight = 360,
+            frameCount = 20_214,
+            outputChoice = EnhancementPlanner.OutputChoice.FULL_HD,
             engineChoice = EnhancementPlanner.EngineChoice.AI_DETAIL
         )
 
