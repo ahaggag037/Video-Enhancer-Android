@@ -44,10 +44,21 @@ internal class LiteRtModelRunner private constructor(
         }
     }
 
-    fun run(input: FloatArray): FloatArray {
+    fun writeInput(input: FloatArray) {
         inputBuffers[0].writeFloat(input)
+    }
+
+    /** Runs inference with already-populated reusable buffers and performs no CPU readback. */
+    fun invoke() {
         model.run(inputBuffers, outputBuffers)
-        return outputBuffers[0].readFloat()
+    }
+
+    fun readOutput(): FloatArray = outputBuffers[0].readFloat()
+
+    fun run(input: FloatArray): FloatArray {
+        writeInput(input)
+        invoke()
+        return readOutput()
     }
 
     @Volatile
