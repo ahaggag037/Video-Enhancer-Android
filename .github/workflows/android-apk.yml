@@ -37,15 +37,14 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Download VDSR AI model
+      - name: Download verified VDSR AI model
         shell: bash
         run: |
           mkdir -p app/src/main/assets
           curl --fail --location --retry 3 --retry-delay 2 \
             "https://huggingface.co/mlboydaisuke/vdsr-litert/resolve/main/vdsr_256_fp16.tflite" \
             --output app/src/main/assets/vdsr_256_fp16.tflite
-          test "$(stat -c%s app/src/main/assets/vdsr_256_fp16.tflite)" -gt 1000000
-          sha256sum app/src/main/assets/vdsr_256_fp16.tflite
+          echo "a80acd9b89919c1ac6e7a72121fe42288f6072de8e5fd40bbadfdd7dfc2ad7ae  app/src/main/assets/vdsr_256_fp16.tflite" | sha256sum --check --strict
 
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
