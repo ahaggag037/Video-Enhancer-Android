@@ -15,14 +15,16 @@ object NanoVsrDeviceBenchmark {
     private const val INPUT_HEIGHT = 180
     private const val INPUT_WIDTH = 320
     private const val CHANNELS = 3
-    private const val WARMUP_RUNS = 1
-    private const val TIMED_RUNS = 3
+    private const val GPU_TIMED_RUNS = 3
+    private const val CPU_TIMED_RUNS = 2
+    private const val SLOW_CPU_WARMUP_MS = 5_000.0
 
     data class Entry(
         val accelerator: Accelerator,
         val loadMs: Double? = null,
         val medianWindowMs: Double? = null,
         val modelOnlyFps: Double? = null,
+        val samples: Int = 0,
         val error: String? = null
     )
 
@@ -39,6 +41,7 @@ object NanoVsrDeviceBenchmark {
                     append(String.format(Locale.US, " • load %.0f ms", entry.loadMs))
                     append(String.format(Locale.US, " • %.1f ms/window", entry.medianWindowMs))
                     append(String.format(Locale.US, " • model-only %.1f fps", entry.modelOnlyFps))
+                    append(" • n=${entry.samples}")
                 }
             }
             append("\nModel-only benchmark; decode/compose/encode are not included.")
@@ -75,22 +78,40 @@ object NanoVsrDeviceBenchmark {
             val loadMs = elapsedMs(loadStart)
 
             runner.writeInput(input)
-            repeat(WARMUP_RUNS) { runner.invoke() }
+            val warmupStart = System.nanoTime()
+            runner.invoke()
+            val warmupMs = elapsedMs(warmupStart)
 
-            val timings = DoubleArray(TIMED_RUNS)
-            repeat(TIMED_RUNS) { index ->
+            if (accelerator == Accelerator.CPU && warmupMs >= SLOW_CPU_WARMUP_MS) {
+                return Entry(
+                    accelerator = accelerator,
+                    loadMs = loadMs,
+                    medianWindowMs = warmupMs,
+                    modelOnlyFps = TEMPORAL_WINDOW * 1000.0 / warmupMs,
+                    samples = 1
+                )
+            }
+
+            val runCount = if (accelerator == Accelerator.GPU) GPU_TIMED_RUNS else CPU_TIMED_RUNS
+            val timings = DoubleArray(runCount)
+            repeat(runCount) { index ->
                 val started = System.nanoTime()
                 runner.invoke()
                 timings[index] = elapsedMs(started)
             }
             timings.sort()
-            val median = timings[timings.size / 2]
+            val median = if (timings.size % 2 == 1) {
+                timings[timings.size / 2]
+            } else {
+                (timings[timings.size / 2 - 1] + timings[timings.size / 2]) / 2.0
+            }
             val fps = TEMPORAL_WINDOW * 1000.0 / median
             Entry(
                 accelerator = accelerator,
                 loadMs = loadMs,
                 medianWindowMs = median,
-                modelOnlyFps = fps
+                modelOnlyFps = fps,
+                samples = runCount
             )
         } catch (failure: Throwable) {
             Entry(
