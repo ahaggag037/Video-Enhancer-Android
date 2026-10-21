@@ -23,7 +23,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="Real-ESRGAN detail recovery + verified fast GPU fallback"
+            android:text="Real-ESRGAN for short high-detail jobs + accelerated GPU for long video"
             android:textColor="#AEB4C0"
             android:textSize="14sp" />
 
@@ -60,7 +60,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Smart uses genuine Real-ESRGAN on low-resolution video and avoids the neural cost when the source does not need it."
+            android:text="Smart estimates neural workload. Short low-resolution clips use genuine Real-ESRGAN; long videos automatically use the accelerated GPU path so processing does not take hours."
             android:textColor="#8F97A6"
             android:textSize="12sp" />
 
@@ -89,7 +89,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="3dp"
-            android:text="These controls are applied by the Fast GPU path and by Smart when it chooses the fast path."
+            android:text="These controls are applied by the accelerated GPU path and by Smart when it protects speed on a long workload."
             android:textColor="#8F97A6"
             android:textSize="12sp" />
 
@@ -196,7 +196,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
             android:layout_marginBottom="20dp"
-            android:text="V2 AI Detail runs a learned Real-ESRGAN x4 model on-device. Smart mode chooses AI only when it can recover useful detail; Fast GPU keeps the proven Media3/Lanczos export path for speed and compatibility."
+            android:text="AI Detail forces learned Real-ESRGAN x4 on every frame and is intended for short clips or maximum-detail jobs. Smart automatically protects processing speed on long videos while keeping the proven Media3 GPU export path."
             android:textColor="#7F8796"
             android:textSize="12sp" />
 
