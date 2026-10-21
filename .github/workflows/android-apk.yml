@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, fix/export-stall-watchdog ]
+    branches: [ main, fix/export-stall-watchdog, feature/v2-ai-enhancer ]
   workflow_dispatch:
 
 permissions:
