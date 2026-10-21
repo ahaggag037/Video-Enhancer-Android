@@ -61,6 +61,8 @@ class MainActivity : AppCompatActivity() {
     private var currentAiProcessor: AiVideoProcessor? = null
     private var currentTempFile: File? = null
     private var exporting = false
+    private var neuralBenchmarkRunning = false
+    private var neuralProfile: NeuralDeviceBenchmark.Profile? = null
 
     private val openVideo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -85,6 +87,7 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         setupSpinners()
         setupSliders()
+        neuralProfile = NeuralDeviceBenchmark.load(this)
 
         selectButton.setOnClickListener {
             if (!exporting) openVideo.launch(arrayOf("video/*"))
@@ -158,15 +161,8 @@ class MainActivity : AppCompatActivity() {
                 if (selectedUri != uri || isFinishing) return@runOnUiThread
                 result.onSuccess { info ->
                     selectedSourceInfo = info
-                    enhanceButton.isEnabled = !exporting
-                    statusText.text = String.format(
-                        Locale.US,
-                        "Ready • %d×%d • %.1f fps • %,d frames",
-                        info.displayWidth,
-                        info.displayHeight,
-                        info.fps,
-                        info.frameCount
-                    )
+                    statusText.text = readySummary(info)
+                    maybeCalibrateNeuralPerformance(uri, info)
                 }.onFailure { error ->
                     selectedSourceInfo = null
                     enhanceButton.isEnabled = false
@@ -174,6 +170,65 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }, "video-analyzer").start()
+    }
+
+    private fun maybeCalibrateNeuralPerformance(uri: Uri, info: AiVideoProcessor.SourceInfo) {
+        val cached = neuralProfile
+        if (cached != null) {
+            enhanceButton.isEnabled = !exporting
+            statusText.text = readySummary(info, cached)
+            return
+        }
+
+        // Avoid loading a neural model for HD sources where Smart will not use full Real-ESRGAN anyway.
+        if (maxOf(info.displayWidth, info.displayHeight) > 1280) {
+            enhanceButton.isEnabled = !exporting
+            return
+        }
+        if (neuralBenchmarkRunning) return
+
+        neuralBenchmarkRunning = true
+        enhanceButton.isEnabled = false
+        statusText.text = "Calibrating AI speed on this phone once…"
+        Thread({
+            val result = runCatching { NeuralDeviceBenchmark.measure(applicationContext) }
+            runOnUiThread {
+                neuralBenchmarkRunning = false
+                result.onSuccess { profile -> neuralProfile = profile }
+                if (selectedUri == uri && !isFinishing) {
+                    enhanceButton.isEnabled = !exporting && selectedSourceInfo != null
+                    statusText.text = result.fold(
+                        onSuccess = { profile -> readySummary(info, profile) },
+                        onFailure = { "${readySummary(info)} • AI benchmark unavailable; conservative Smart limits active" }
+                    )
+                }
+            }
+        }, "neural-device-benchmark").start()
+    }
+
+    private fun readySummary(
+        info: AiVideoProcessor.SourceInfo,
+        profile: NeuralDeviceBenchmark.Profile? = neuralProfile
+    ): String {
+        val base = String.format(
+            Locale.US,
+            "Ready • %d×%d • %.1f fps • %,d frames",
+            info.displayWidth,
+            info.displayHeight,
+            info.fps,
+            info.frameCount
+        )
+        return if (profile != null) {
+            String.format(
+                Locale.US,
+                "%s • AI %.0f ms/tile %s",
+                base,
+                profile.msPerTile,
+                profile.backend.name
+            )
+        } else {
+            base
+        }
     }
 
     private fun applyPreset(brightness: Int, contrast: Int, saturation: Int) {
@@ -209,6 +264,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startEnhancement() {
+        if (neuralBenchmarkRunning && selectedEngine() == EnhancementPlanner.EngineChoice.SMART) {
+            statusText.text = "Finishing the one-time AI speed calibration…"
+            return
+        }
+
         val input = selectedUri ?: return
         val info = selectedSourceInfo ?: run {
             statusText.text = "Video analysis is not ready yet"
@@ -220,15 +280,17 @@ class MainActivity : AppCompatActivity() {
             sourceHeight = info.displayHeight,
             frameCount = info.frameCount,
             outputChoice = selectedOutput(),
-            engineChoice = selectedEngine()
+            engineChoice = selectedEngine(),
+            neuralMsPerTile = neuralProfile?.msPerTile
         )
 
         setExporting(true)
         when (plan.path) {
             EnhancementPlanner.Path.AI_DETAIL -> startAiEnhancement(input, plan)
             EnhancementPlanner.Path.FAST_GPU -> startFastEnhancement(
-                input,
-                smartFallback = plan.requestedEngine == EnhancementPlanner.EngineChoice.SMART
+                input = input,
+                smartFallback = plan.requestedEngine == EnhancementPlanner.EngineChoice.SMART,
+                avoidedNeuralMs = plan.estimatedNeuralMs
             )
         }
     }
@@ -236,7 +298,9 @@ class MainActivity : AppCompatActivity() {
     private fun startAiEnhancement(input: Uri, plan: EnhancementPlanner.Plan) {
         progressBar.isIndeterminate = false
         progressBar.progress = 0
-        progressText.text = "0% • Preparing Real-ESRGAN"
+        progressText.text = plan.estimatedNeuralMs?.let {
+            "0% • AI estimate ${formatDuration(it)} • preparing"
+        } ?: "0% • Preparing Real-ESRGAN"
         statusText.text = "Loading genuine AI detail recovery…"
 
         val outputDir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "VideoEnhancer")
@@ -289,7 +353,7 @@ class MainActivity : AppCompatActivity() {
                         progressBar.isIndeterminate = true
                         progressText.text = "Smart recovery • Fast GPU"
                         statusText.text = "Neural engine unavailable (${compactError(error)}). Switching to accelerated GPU…"
-                        startFastEnhancement(input, smartFallback = true)
+                        startFastEnhancement(input, smartFallback = true, avoidedNeuralMs = plan.estimatedNeuralMs)
                     } else {
                         setExporting(false)
                         val failure = "AI enhancement failed: ${compactError(error)}"
@@ -310,11 +374,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Known-good V1 Media3 path retained as the compatibility/speed engine. */
-    private fun startFastEnhancement(input: Uri, smartFallback: Boolean) {
+    private fun startFastEnhancement(
+        input: Uri,
+        smartFallback: Boolean,
+        avoidedNeuralMs: Long? = null
+    ) {
         progressBar.isIndeterminate = true
-        progressText.text = if (smartFallback) "Smart speed path • Fast GPU" else "Fast GPU export"
+        progressText.text = if (smartFallback) {
+            avoidedNeuralMs?.let { "Smart speed path • avoided ~${formatDuration(it)} full AI pass" }
+                ?: "Smart speed path • Fast GPU"
+        } else {
+            "Fast GPU export"
+        }
         statusText.text = if (smartFallback) {
-            "Smart chose the accelerated GPU path for this video length…"
+            avoidedNeuralMs?.let {
+                "Smart measured full Real-ESRGAN at about ${formatDuration(it)} and chose the accelerated GPU path…"
+            } ?: "Smart chose the accelerated GPU path for this video length…"
         } else {
             "Enhancing with Fast GPU…"
         }
@@ -330,7 +405,6 @@ class MainActivity : AppCompatActivity() {
             videoEffects += HslAdjustment.Builder().adjustSaturation(saturation).build()
         }
 
-        // Keep the exact resolution behavior that already passed a real 240p -> 1080p device test.
         when (resolutionSpinner.selectedItemPosition) {
             1 -> videoEffects += LanczosResample.scaleToFitWithFlexibleOrientation(1920, 1080)
             2 -> videoEffects += LanczosResample.scaleToFitWithFlexibleOrientation(2560, 1440)
@@ -442,13 +516,23 @@ class MainActivity : AppCompatActivity() {
             progressBar.progress = 0
         }
         selectButton.isEnabled = !value
-        enhanceButton.isEnabled = !value && selectedUri != null && selectedSourceInfo != null
+        enhanceButton.isEnabled = !value && !neuralBenchmarkRunning && selectedUri != null && selectedSourceInfo != null
         engineSpinner.isEnabled = !value
         presetSpinner.isEnabled = !value
         resolutionSpinner.isEnabled = !value
         brightnessSeek.isEnabled = !value
         contrastSeek.isEnabled = !value
         saturationSeek.isEnabled = !value
+    }
+
+    private fun formatDuration(ms: Long): String {
+        val seconds = (ms / 1000.0).coerceAtLeast(0.0)
+        return when {
+            seconds < 10.0 -> String.format(Locale.US, "%.1fs", seconds)
+            seconds < 60.0 -> String.format(Locale.US, "%.0fs", seconds)
+            seconds < 3600.0 -> String.format(Locale.US, "%.1f min", seconds / 60.0)
+            else -> String.format(Locale.US, "%.1f h", seconds / 3600.0)
+        }
     }
 
     private fun compactError(error: Throwable): String {
