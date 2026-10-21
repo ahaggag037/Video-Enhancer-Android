@@ -11,8 +11,8 @@ android {
         applicationId = "com.haggag.videoenhancer"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0-ai-beta"
     }
 
     buildTypes {
@@ -42,6 +42,7 @@ dependencies {
     implementation("androidx.media3:media3-common:1.11.1")
     implementation("androidx.media3:media3-effect:1.11.1")
     implementation("androidx.media3:media3-transformer:1.11.1")
+    implementation("com.google.ai.edge.litert:litert:2.1.5")
 
     testImplementation("junit:junit:4.13.2")
 }
