@@ -6,6 +6,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VideoEnhancer">
         <activity
+            android:name=".NanoVsrBenchmarkActivity"
+            android:exported="false" />
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
