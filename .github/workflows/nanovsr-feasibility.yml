@@ -1,0 +1,92 @@
+name: NanoVSR Android Feasibility
+
+on:
+  push:
+    branches: [ feature/v3-temporal-restoration-rd ]
+    paths:
+      - '.github/workflows/nanovsr-feasibility.yml'
+      - 'tools/nanovsr/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-and-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch>=2.1' 'onnx>=1.15' 'onnxscript>=0.7' 'numpy>=1.24' 'opencv-python-headless>=4.8'
+
+      - name: Fetch official NanoVSR source and 226k checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/filippawlicki/nanovsr.git /tmp/nanovsr
+          curl -L --fail --retry 3 --retry-delay 2 \
+            https://github.com/filippawlicki/nanovsr/releases/download/v1.0/nanovsr_226k.pth \
+            -o /tmp/nanovsr/nanovsr_226k.pth
+          echo 'be3df12f2a0d99d9699656aa4a85a51c119663aa84c7040ac6580a0215d0b00e  /tmp/nanovsr/nanovsr_226k.pth' | sha256sum -c -
+
+      - name: Export official deploy graph to ONNX
+        working-directory: /tmp/nanovsr
+        run: |
+          python export_onnx.py \
+            --checkpoint nanovsr_226k.pth \
+            --output /tmp/nanovsr_226k_t5_64.onnx \
+            --num_frames 5 \
+            --height 64 \
+            --width 64
+
+      - name: Audit exported graph
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          import onnx
+
+          path = '/tmp/nanovsr_226k_t5_64.onnx'
+          model = onnx.load(path)
+          onnx.checker.check_model(model)
+          counts = Counter(node.op_type for node in model.graph.node)
+          inputs = [{"name": x.name, "dims": [d.dim_value or d.dim_param for d in x.type.tensor_type.shape.dim]} for x in model.graph.input]
+          outputs = [{"name": x.name, "dims": [d.dim_value or d.dim_param for d in x.type.tensor_type.shape.dim]} for x in model.graph.output]
+          report = {
+              "model": "NanoVSR-226k official v1.0",
+              "temporal_window": 5,
+              "probe_lr_shape": [1, 5, 3, 64, 64],
+              "inputs": inputs,
+              "outputs": outputs,
+              "node_count": len(model.graph.node),
+              "operator_counts": dict(sorted(counts.items())),
+              "android_attention_ops": {k: counts.get(k, 0) for k in ["DepthToSpace", "PRelu", "Resize", "Concat", "Conv", "LeakyRelu"]},
+              "gate_status": "EXPORT_PASS_ACCELERATOR_COVERAGE_UNVERIFIED"
+          }
+          with open('/tmp/nanovsr_graph_audit.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          print(json.dumps(report, indent=2))
+          PY
+          sha256sum /tmp/nanovsr_226k_t5_64.onnx | tee /tmp/nanovsr_onnx.sha256
+
+      - name: Upload feasibility artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NanoVSR-226k-feasibility
+          path: |
+            /tmp/nanovsr_226k_t5_64.onnx
+            /tmp/nanovsr_graph_audit.json
+            /tmp/nanovsr_onnx.sha256
+          if-no-files-found: error
