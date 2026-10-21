@@ -1,0 +1,136 @@
+name: Build Temporal AI Benchmark APK
+
+on:
+  push:
+    branches: [ feature/v3-temporal-restoration-rd ]
+    paths:
+      - '.github/workflows/nanovsr-android-benchmark-apk.yml'
+      - 'diagnostics/nanovsr/**'
+      - 'app/src/main/java/com/haggag/videoenhancer/NanoVsrBenchmarkActivity.kt'
+      - 'app/src/main/java/com/haggag/videoenhancer/NanoVsrDeviceBenchmark.kt'
+      - 'app/src/main/java/com/haggag/videoenhancer/LiteRtModelRunner.kt'
+      - 'app/src/main/res/layout/activity_nanovsr_benchmark.xml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-benchmark-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+
+      - name: Install Android 36 SDK
+        run: /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Install CPU PyTorch and LiteRT converter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0'
+          python -m pip install 'litert-torch==0.9.4' 'ai-edge-litert' numpy
+
+      - name: Convert official NanoVSR-226k for 5x180x320 benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/filippawlicki/nanovsr.git /tmp/nanovsr
+          curl -L --fail --retry 3 --retry-delay 2 \
+            https://github.com/filippawlicki/nanovsr/releases/download/v1.0/nanovsr_226k.pth \
+            -o /tmp/nanovsr/nanovsr_226k.pth
+          echo 'be3df12f2a0d99d9699656aa4a85a51c119663aa84c7040ac6580a0215d0b00e  /tmp/nanovsr/nanovsr_226k.pth' | sha256sum -c -
+          python - <<'PY'
+          import sys
+          import torch
+          import litert_torch
+
+          sys.path.insert(0, '/tmp/nanovsr')
+          from models.nanovsr import NanoVSR
+
+          checkpoint = torch.load('/tmp/nanovsr/nanovsr_226k.pth', map_location='cpu')
+          if isinstance(checkpoint, dict):
+              for key in ('params_ema', 'params', 'model_state_dict'):
+                  if key in checkpoint:
+                      checkpoint = checkpoint[key]
+                      break
+
+          feat_key = 'feat_extract.rbr_dense.0.weight'
+          num_feat = int(checkpoint[feat_key].shape[0])
+          indices = {
+              int(key.split('.')[1])
+              for key in checkpoint
+              if key.startswith('forward_net.') and key.split('.')[1].isdigit()
+          }
+          num_blocks = max(indices) + 1
+
+          model = NanoVSR(num_feat=num_feat, num_blocks=num_blocks)
+          model.load_state_dict(checkpoint, strict=True)
+          model.switch_to_deploy()
+          model.eval()
+
+          sample = torch.zeros(1, 5, 3, 180, 320, dtype=torch.float32)
+          edge_model = litert_torch.convert(model, (sample,))
+          edge_model.export('/tmp/nanovsr_226k_t5_180x320.tflite')
+          PY
+          mkdir -p app/src/main/assets
+          cp /tmp/nanovsr_226k_t5_180x320.tflite app/src/main/assets/nanovsr_226k_t5_180x320.tflite
+          sha256sum app/src/main/assets/nanovsr_226k_t5_180x320.tflite | tee /tmp/nanovsr_benchmark_model.sha256
+
+      - name: Switch build to standalone diagnostic package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp diagnostics/nanovsr/AndroidManifest.xml app/src/main/AndroidManifest.xml
+          sed -i 's/applicationId = "com.haggag.videoenhancer"/applicationId = "com.haggag.videoenhancer.benchmark"/' app/build.gradle.kts
+          sed -i 's/versionName = "2.0.0-ai"/versionName = "3.0.0-temporal-benchmark"/' app/build.gradle.kts
+
+      - name: Run unit tests
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build diagnostic APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify diagnostic APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -F 'assets/nanovsr_226k_t5_180x320.tflite'
+          unzip -t app/build/outputs/apk/debug/app-debug.apk >/dev/null
+          sha256sum app/build/outputs/apk/debug/app-debug.apk | tee /tmp/temporal_ai_benchmark_apk.sha256
+
+      - name: Upload Temporal AI Lab APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Temporal-AI-Lab-NanoVSR-Android-Benchmark
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            /tmp/nanovsr_benchmark_model.sha256
+            /tmp/temporal_ai_benchmark_apk.sha256
+          if-no-files-found: error
