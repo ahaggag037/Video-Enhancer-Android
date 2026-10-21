@@ -37,15 +37,33 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      - name: Download pinned Real-ESRGAN model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets
+          curl -L --fail --retry 3 --retry-delay 2 \
+            "https://huggingface.co/litert-community/real-esrgan-x4v3-litert/resolve/0a6fc35ba3e34e80b53f43089c1d2b612d33bea9/realesr_general_x4v3.tflite" \
+            -o app/src/main/assets/realesr_general_x4v3.tflite
+          echo "6d597b46d812ada42bdde641ec6e78c0ef0b78ff5a825fcfd74b9a1b3bcbe9a4  app/src/main/assets/realesr_general_x4v3.tflite" | sha256sum -c -
+
       - name: Run unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
 
       - name: Build installable debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Verify APK contains AI model
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -F "assets/realesr_general_x4v3.tflite"
+          unzip -t app/build/outputs/apk/debug/app-debug.apk >/dev/null
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Video-Enhancer-Android-debug
+          name: Video-Enhancer-V2-AI-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
