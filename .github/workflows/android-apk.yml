@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, fix/export-stall-watchdog ]
   workflow_dispatch:
 
 permissions:
@@ -36,6 +36,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+
+      - name: Run unit tests
+        run: gradle :app:testDebugUnitTest --stacktrace
 
       - name: Build installable debug APK
         run: gradle :app:assembleDebug --stacktrace
