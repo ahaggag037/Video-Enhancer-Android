@@ -57,7 +57,6 @@ jobs:
 
           sys.path.insert(0, '/tmp/nanovsr')
           from models.nanovsr import NanoVSR
-          from utils import detect_model_config, load_checkpoint_state_dict
           import litert_torch
 
           report_path = '/tmp/nanovsr_litert_report.json'
@@ -74,11 +73,33 @@ jobs:
               'parity': 'NOT_RUN',
           }
 
+          def load_state(path):
+              checkpoint = torch.load(path, map_location='cpu')
+              if isinstance(checkpoint, dict):
+                  for key in ('params_ema', 'params', 'model_state_dict'):
+                      if key in checkpoint:
+                          return checkpoint[key]
+              return checkpoint
+
+          def detect_config(state):
+              feat_key = 'feat_extract.rbr_dense.0.weight'
+              if feat_key not in state:
+                  raise KeyError(f'Missing expected NanoVSR feature key: {feat_key}')
+              num_feat = int(state[feat_key].shape[0])
+              indices = {
+                  int(key.split('.')[1])
+                  for key in state
+                  if key.startswith('forward_net.') and key.split('.')[1].isdigit()
+              }
+              if not indices:
+                  raise KeyError('Could not detect NanoVSR forward block count')
+              return num_feat, max(indices) + 1
+
           try:
               torch.manual_seed(20261021)
-              state = load_checkpoint_state_dict('/tmp/nanovsr/nanovsr_226k.pth')
-              num_feat, num_blocks = detect_model_config(state)
-              report['detected_config'] = {'num_feat': int(num_feat), 'num_blocks': int(num_blocks)}
+              state = load_state('/tmp/nanovsr/nanovsr_226k.pth')
+              num_feat, num_blocks = detect_config(state)
+              report['detected_config'] = {'num_feat': num_feat, 'num_blocks': num_blocks}
 
               model = NanoVSR(num_feat=num_feat, num_blocks=num_blocks)
               model.load_state_dict(state, strict=True)
@@ -114,7 +135,6 @@ jobs:
               reload_max_abs = float(np.max(np.abs(converted - reloaded_out)))
               report['reload_max_abs_error'] = reload_max_abs
 
-              # This is a smoke/parity gate, not the final image-quality metric.
               parity_ok = max_abs <= 5e-3 and reload_max_abs <= 1e-6
               report['parity'] = 'PASS' if parity_ok else 'FAIL'
               if not parity_ok:
@@ -124,7 +144,7 @@ jobs:
           except Exception as exc:
               report['error_type'] = type(exc).__name__
               report['error'] = str(exc)
-              report['traceback_tail'] = traceback.format_exc().splitlines()[-30:]
+              report['traceback_tail'] = traceback.format_exc().splitlines()[-40:]
               with open(report_path, 'w') as f:
                   json.dump(report, f, indent=2)
               print(json.dumps(report, indent=2))
