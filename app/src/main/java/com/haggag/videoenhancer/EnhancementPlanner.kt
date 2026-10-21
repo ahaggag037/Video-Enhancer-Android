@@ -5,6 +5,14 @@ import kotlin.math.roundToInt
 
 object EnhancementPlanner {
 
+    /**
+     * Smart mode is deliberately bounded. Real-ESRGAN is genuine learned x4 SR, but applying
+     * tiled neural inference to tens of thousands of video frames is not an interactive mobile
+     * workload. This budget keeps Smart fast while leaving AI_DETAIL available when the user
+     * explicitly wants maximum neural recovery.
+     */
+    private const val SMART_AI_TILE_INFERENCE_BUDGET = 3_600L
+
     enum class EngineChoice {
         SMART,
         AI_DETAIL,
@@ -35,10 +43,12 @@ object EnhancementPlanner {
     fun plan(
         sourceWidth: Int,
         sourceHeight: Int,
+        frameCount: Int,
         outputChoice: OutputChoice,
         engineChoice: EngineChoice
     ): Plan {
         require(sourceWidth > 0 && sourceHeight > 0) { "Source dimensions must be positive" }
+        require(frameCount > 0) { "Frame count must be positive" }
 
         val target = targetSize(sourceWidth, sourceHeight, outputChoice)
         val sourcePixels = sourceWidth.toLong() * sourceHeight
@@ -50,7 +60,15 @@ object EnhancementPlanner {
             EngineChoice.FAST_GPU -> Path.FAST_GPU
             EngineChoice.SMART -> {
                 val meaningfulUpscale = targetPixels > (sourcePixels * 5L / 4L)
-                if (meaningfulUpscale && sourceLongEdge <= 1280) Path.AI_DETAIL else Path.FAST_GPU
+                val tilesPerFrame = AiTileGrid.tiles(sourceWidth, sourceHeight).size.toLong()
+                val estimatedNeuralTiles = tilesPerFrame * frameCount.toLong()
+                val mobileAiWorkload = estimatedNeuralTiles <= SMART_AI_TILE_INFERENCE_BUDGET
+
+                if (meaningfulUpscale && sourceLongEdge <= 1280 && mobileAiWorkload) {
+                    Path.AI_DETAIL
+                } else {
+                    Path.FAST_GPU
+                }
             }
         }
 
